@@ -8,6 +8,25 @@ STORAGE_COUNTERS=frozenset(('tasks','running','db_bytes'))
 def safe_counters(values,allowed):
     return {key:value for key,value in values.items() if key in allowed and type(value) is int}
 
+def account_video_quota(account, *, chat_cost, chat_start, now):
+    """Project daily points and weekly work quota into Fast 15s counts.
+
+    Counts describe quota only; login, proxy and busy status remain separate.
+    This does not create usage counters or change either reset schedule.
+    """
+    if account.get('site') == 'doubao':
+        return {}
+    remaining = max(0, int(account.get('remaining') or 0))
+    balance = account.get('credit_balance')
+    if balance is not None:
+        remaining = min(remaining, max(0, int(balance)))
+    cost, start = max(1, int(chat_cost)), max(1, int(chat_start))
+    blocked = account.get('rate_limited') or account.get('quota_blocked')
+    chat = 0 if blocked or remaining < start else 1 + (remaining - start) // cost
+    work = int(float(account.get('work_blocked_until') or 0) <= now)
+    return {'chat_15s_remaining': chat, 'work_15s_remaining': work}
+
+
 def download_bytes(directory):
     total=0
     try:

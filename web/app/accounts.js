@@ -235,22 +235,25 @@ function sameLoginNote(x){
     +'同一账号：<span translate="no">'+esc(twins.join('、'))+'</span>'
     +(x.duplicate_of?'<br>重复项不参与自动调度，使用 <span translate="no">'+esc(x.duplicate_of)+'</span>':'')+'</div>';
 }
-/** 剩余额度列：dola 号按点数；豆包号不报剩余，只显示今天出了几条 */
+/** Dola displays Fast 15s counts for each mode; Doubao keeps its upstream quota summary. */
 function quotaCell(x,unit){
   if(x.site==='doubao')
     return '<span class="tiny">今日已出 </span><b>'+(x.used_today||0)+'</b><span class="tiny"> 条（豆包按上游额度）</span>';
-  return `<b>${x.remaining}</b> / ${x.limit}`+(unit?'<span class="tiny">（点数/上限）</span>':'')+
-    (x.credit_balance==null?'':`<div class="tiny">上游余额 ${x.credit_balance}${x.credit_balance<2?'（已用完）':''}</div>`)+
-    workQuotaLine(x);
+  const points=`每日点数：${x.remaining} / ${x.limit}`+
+    (x.credit_balance==null?'':`；上游余额：${x.credit_balance}`);
+  return workQuotaLine(x)+`<div class="tiny" title="${esc('聊天15s额度每天北京时间08:00更新；'+points)}">聊天15s：剩余${quotaCount(x.chat_15s_remaining)}条</div>`;
 }
-/** 2.0 的 15 秒（工作模式）额度：每号 7 天 1 条，和上面的每日点数分开。开关没开就不显示 */
+/** Weekly work quota is independent of daily chat points and the legacy auto-mode switch. */
 function work15On(){return (TEST_GEN_DURATIONS['seedance-2.0-fast']||[]).includes(15);}
 function workUsed(x){return (x.work_blocked_until||0)*1000>Date.now();}
+function quotaCount(value){return Number.isInteger(value)&&value>=0?value:'—';}
 function workQuotaLine(x){
-  if(x.site==='doubao'||!work15On())return '';
-  return workUsed(x)
-    ?`<div class="tiny" title="${esc(x.work_block_reason||'')}">工作 15 秒：已用，${fmt(x.work_blocked_until)} 恢复</div>`
-    :'<div class="tiny" title="每号每 7 天 1 条，从首次使用起算">工作 15 秒：可用 1 条</div>';
+  if(x.site==='doubao')return '';
+  const used=workUsed(x),reset=used?`；${fmt(x.work_blocked_until)} 恢复`:'';
+  const title='工作15s额度每7天恢复1条，从使用时起算'+reset+
+    (x.work_block_reason?`；${x.work_block_reason}`:'');
+  return `<div class="tiny" title="${esc(title)}">工作15s：剩余${quotaCount(x.work_15s_remaining)}条</div>`+
+    (used?`<div class="tiny">${fmt(x.work_blocked_until)} 恢复</div>`:'');
 }
 function workReadyCount(accounts){
   return (accounts||[]).filter(x=>x.site!=='doubao'&&x.scheduling&&!x.busy&&x.login_ok!==0
@@ -302,7 +305,7 @@ function renderAccounts(){
   allAccountNames=a.accounts.map(x=>x.name);
   allAccounts=a.accounts.filter(x=>!x.add_job);
   const hint=q('#resetHint');
-  if(hint&&a.next_reset_at)hint.textContent=`额度重置：${a.reset_tz} 每天 ${a.reset_hour}:00（下次 ${fmt(a.next_reset_at)}）`;
+  if(hint&&a.next_reset_at)hint.textContent=`聊天额度重置：${a.reset_tz} 每天 ${a.reset_hour}:00（下次 ${fmt(a.next_reset_at)}）；工作额度使用后每7天恢复`;
   renderGroupBar(a);
   renderEgressWarn(a);
   const sorted=[...a.accounts].sort((x,y)=>compareAccounts(x,y,accSort));
@@ -1355,4 +1358,3 @@ async function cancelAppleLogin(){
   try{await api('/api/admin/jobs/'+encodeURIComponent(name)+'/apple-cancel',{method:'POST'});if(epoch===dialogEpoch){clearTimeout(appleProgressTimer);pollAppleProgress(epoch);}refresh();}
   catch(e){if(epoch===dialogEpoch){button.disabled=false;q('#appleFeedback').textContent=e.message;}}
 }
-

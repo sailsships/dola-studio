@@ -33,7 +33,7 @@ from compress import GzipTextMiddleware
 from pydantic import BaseModel, Field
 
 import config
-from studio_views import public_health, account_summary
+from studio_views import public_health, account_summary, account_video_quota
 import cred_store
 import failure_text
 from account_transport import http_proxy, redact_error
@@ -3078,7 +3078,12 @@ async def admin_accounts(x_admin_key: str | None = Header(default=None)):
     _admin_auth(x_admin_key)
     accounts = pool.list_accounts(processing_accounts=store.busy_account_ids())
     sessions = proxy_store.sessions_snapshot()
+    from browser_pool import duration_cost, start_need
+    chat_cost = duration_cost('seedance-2.0-fast', 15)
+    chat_start = start_need('seedance-2.0-fast', 15)
+    quota_now = time.time()
     for acc in accounts:
+        acc.update(account_video_quota(acc, chat_cost=chat_cost, chat_start=chat_start, now=quota_now))
         info = get_account_proxy(acc["name"])
         acc["proxy_id"] = info["id"] if info else None
         acc["proxy_name"] = info["name"] if info else None
