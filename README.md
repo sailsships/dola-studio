@@ -1,3 +1,16 @@
+<h2 align="center">项目交流</h2>
+
+<p align="center">
+  欢迎加入 Dola Studio 技术交流群，交流使用经验、反馈问题与讨论项目开发。<br>
+  <strong>QQ 群：647127178</strong> · 扫描下方二维码加入
+</p>
+
+<p align="center">
+  <a href="docs/assets/project-community-qq.jpg"><img src="docs/assets/project-community-qq.jpg" width="360" alt="Dola Studio 项目技术交流群二维码，QQ 群号 647127178"></a>
+</p>
+
+---
+
 <p align="center">
   <img src="web/logo.svg" width="96" height="96" alt="Dola Studio Logo">
 </p>
