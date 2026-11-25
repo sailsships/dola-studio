@@ -1,0 +1,53 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+.private/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Account sessions, storage and generated media
+/accounts/
+/downloads/
+/refs/
+/data/
+/logs/
+/backups/
+/update/
+/work/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.log
+*.har
+*.mp4
+*.webm
+*.zip
+cookie_state.json
+.cloak-session-cookies.json
+storage_state.json
+auth.json
+
+# Do not commit local deployment entrypoints containing private environment values
+/run.sh
+/dola.env

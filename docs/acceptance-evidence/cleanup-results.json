@@ -1,0 +1,18 @@
+{
+  "productionAccountsPreserved": true,
+  "productionProxiesPreserved": true,
+  "accountProxyBindingsUnchanged": true,
+  "auditKeysRemaining": 0,
+  "auditProxiesRemaining": 0,
+  "settingsPreserved": {
+    "concurrency": true,
+    "window-concurrency": true,
+    "upscale": true,
+    "responder": true
+  },
+  "auditTasksRetainedAsEvidence": true,
+  "servicePid": "1103068",
+  "auditAdminRemoved": true,
+  "auditOwnerTokenRejected": true,
+  "healthOk": true
+}

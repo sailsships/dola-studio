@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+python-multipart
+aiohttp
+requests
+PySocks
+pydantic
+patchright
+python-dotenv
+pillow
+pycryptodome
+cryptography
+playwright
+opencv-python-headless
+tzdata
+cloakbrowser==0.6.3

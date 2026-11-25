@@ -1,0 +1,72 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "name": "login-system-fonts-no-font-face",
+      "passed": true
+    },
+    {
+      "name": "navigation-dash",
+      "passed": true
+    },
+    {
+      "name": "navigation-tasks",
+      "passed": true
+    },
+    {
+      "name": "navigation-videos",
+      "passed": true
+    },
+    {
+      "name": "navigation-accounts",
+      "passed": true
+    },
+    {
+      "name": "navigation-proxies",
+      "passed": true
+    },
+    {
+      "name": "navigation-keys",
+      "passed": true
+    },
+    {
+      "name": "navigation-api",
+      "passed": true
+    },
+    {
+      "name": "chat-work-toggle-no-generation",
+      "passed": true
+    }
+  ],
+  "platformFonts": [
+    {
+      "familyName": "Microsoft YaHei UI",
+      "postScriptName": "MicrosoftYaHeiUI",
+      "isCustomFont": false,
+      "glyphCount": 4
+    }
+  ],
+  "viewports": [
+    {
+      "width": 1500,
+      "documentWidth": 1490,
+      "font": "\"Segoe UI Variable Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", system-ui, sans-serif"
+    },
+    {
+      "width": 1024,
+      "documentWidth": 1014,
+      "font": "\"Segoe UI Variable Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", system-ui, sans-serif"
+    },
+    {
+      "width": 390,
+      "documentWidth": 390,
+      "font": "\"Segoe UI Variable Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", \"PingFang SC\", system-ui, sans-serif"
+    }
+  ],
+  "fontNetworkRequests": [],
+  "pageErrors": [],
+  "logoutHttp": 200,
+  "temporaryTokenRejected": 401,
+  "mockedRequests": 0,
+  "generationRequests": 0
+}

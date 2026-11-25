@@ -1,0 +1,15 @@
+{
+  "deployed": true,
+  "backup": "/opt/dola-pool/backups/studio-live-fix-20261125-015055",
+  "healthOk": true,
+  "files": {
+    "browser_video_params.py": "7e4795086d65cad76fc76c039b7997cf5d67bf38622a4418dfffea142c7926c3",
+    "video_worker_ui.py": "e0f04b157ae6fb02c578024723612a2cd3bc52c9331ef9c4da035538445fa0e6",
+    "video_worker_agent.py": "4b65e2f95307b20acdcee21d4de16472fdcc893a96d70e3b62c8bc948c637298",
+    "NOTICE.md": "68d7b8ed6acbb717b769ceac33cb941200490405bf81ec0f62221caa82298316",
+    "CUSTOM_LICENSE.md": "d1bf82c896d9560c7ef2658af4d4233c3614a79c53f851ad29dd12283635adce",
+    "THIRD_PARTY_NOTICES.md": "3701fa22e9fec6c980804a775b36121c98cf44d3c041dc8e0b829a5498c02281"
+  },
+  "originalLicensePreserved": true,
+  "idleAtRestart": true
+}

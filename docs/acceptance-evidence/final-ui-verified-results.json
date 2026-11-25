@@ -1,0 +1,33 @@
+{
+  "completed": true,
+  "passed": true,
+  "results": [
+    {
+      "taskId": "test_59b876deca2049f284fffa1c6326487a",
+      "mode": "work",
+      "initialState": "完成",
+      "finalStatus": "completed",
+      "uiMatchesPersistentState": true,
+      "media": {
+        "duration": 15.104,
+        "width": 1280,
+        "height": 720,
+        "playing": true
+      }
+    },
+    {
+      "taskId": "test_e7872758717a42228e754e8035d7e115",
+      "mode": "chat",
+      "initialState": "完成",
+      "finalStatus": "completed",
+      "uiMatchesPersistentState": true,
+      "media": {
+        "duration": 15.104,
+        "width": 1280,
+        "height": 720,
+        "playing": true
+      }
+    }
+  ],
+  "mockedRequests": 0
+}

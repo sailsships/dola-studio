@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "http": 206,
+  "bytes": 7561310,
+  "sha256": "a78324296ab0c14c7a252c469772a74abe70452ca053923c3a99a6e61d372fd9",
+  "matchesServerFile": true,
+  "serialRanges": 29,
+  "elapsedSeconds": 57.11,
+  "fullRequestTimedOut": true
+}

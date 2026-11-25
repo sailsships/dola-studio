@@ -1,0 +1,4907 @@
+"""Dola Studio OpenAI 兼容视频服务（FastAPI）+ 管理面板后端。
+
+对外协议（异步两段式）：
+  POST /v1/videos/generations   -> {"id","status","model","prompt"}
+  GET  /v1/videos/{id}          -> {"id","status","video_url","error"}
+  GET  /videos/<file>           -> 出片转存静态服务
+
+管理面板：GET / -> web/index.html；管理接口 /api/admin/*。
+"""
+import asyncio
+import aiohttp
+import base64
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import time
+import uuid
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import AsyncExitStack
+from pathlib import Path
+from typing import Any, Literal
+
+from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from compress import GzipTextMiddleware
+from pydantic import BaseModel, Field
+
+import config
+from studio_views import public_health, account_summary
+import cred_store
+import failure_text
+from account_transport import http_proxy, redact_error
+import proxy_store
+import sites
+import updater
+import upscale
+import dola_responder
+import work_reply
+import window_concurrency
+import reference_audio
+import generation_trace
+from force15_worker import request_error as force15_request_error
+import video_link
+from prompt_context import dispatch_prompt, reference_supplement
+from add_account import add_account_flow
+from apple_login import AppleLoginControl, apple_login_flow
+from cookie_login import import_cookie_account, import_cookie_accounts_from_text
+from cookie_export import CookieExportError, build_export
+from account_proxy_selection import bind_selected_proxy, validate_proxy_ids
+from credential_import import allocate_credentials, parse_account_text
+from browser_pool import (
+    ACTIVE_GROUPS,
+    GROUP_ABNORMAL,
+    GROUP_BUSY,
+    GROUP_COOLING,
+    GROUP_FULL,
+    GROUP_HALF,
+    GROUP_ORDER,
+    GROUP_PENDING,
+    GROUP_RISK,
+    AllAccountsLimitedError,
+    AllAccountsQuotaBlockedError,
+    BrowserPool,
+)
+from media import (
+    cleanup_local_references,
+    delete_reference_thumbnails,
+    download_reference_images,
+    materialize_data_urls,
+    save_reference_thumbnails,
+    sweep_stale_references,
+    validate_reference_urls,
+)
+from proxy_store import (
+    create_proxy,
+    delete_proxy,
+    get_account_proxy,
+    list_proxies,
+    set_account_proxy,
+    update_proxy,
+)
+from store import PendingTaskLimitExceeded, TaskQuotaExceeded, TaskStore
+from stress_test import run_stress
+import user_store
+from user_store import (
+    create_user as user_create,
+    delete_user as user_delete,
+    get_user as user_get,
+    list_users as user_list,
+    update_user as user_update,
+    verify_login as user_verify,
+)
+
+Path(config.DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
+Path("web").mkdir(parents=True, exist_ok=True)
+
+APP_VERSION = "2.8.3"
+
+app = FastAPI(title="Dola Studio", version=APP_VERSION)
+
+# 浏览器直连（画布这类纯前端）需要 CORS；默认放开所有来源，
+# 用 DOLA_CORS_ORIGINS 收紧（逗号分隔）。鉴权依旧是 Bearer Key，放开来源不等于放开权限。
+CORS_ORIGINS = [o.strip() for o in os.getenv("DOLA_CORS_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS or ["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
+)
+
+# 面板列表接口很大，跨洋访问先压缩（只压文本类响应，视频与 Range 请求不动）
+app.add_middleware(GzipTextMiddleware)
+
+store = TaskStore(config.DB_PATH)
+pool = BrowserPool(max_concurrency=store.get_global_concurrency(config.MAX_CONCURRENCY))
+
+app.mount("/videos", StaticFiles(directory=config.DOWNLOAD_DIR), name="videos")
+# 参考图缩略图（任务结束后唯一能回看的副本）；文件名 = <task_id>_<index>.jpg
+Path(config.THUMB_DIR).mkdir(parents=True, exist_ok=True)
+app.mount("/thumbs", StaticFiles(directory=config.THUMB_DIR), name="thumbs")
+
+def _restore_failed_add_jobs() -> dict[str, dict]:
+    """部署时一次性恢复失败的加号记录；不恢复或自动执行运行中的任务。"""
+    snapshot = Path(__file__).with_name(".restore-add-jobs.json")
+    if not snapshot.exists():
+        return {}
+    try:
+        saved = json.loads(snapshot.read_text(encoding="utf-8"))
+        if not isinstance(saved, dict):
+            raise ValueError("invalid job snapshot")
+        from retry_state import is_incomplete_account
+        existing = {a["name"]: a for a in pool.list_accounts()}
+        jobs = {name: job for name, job in saved.items()
+                if isinstance(job, dict) and job.get("kind") == "add"
+                and job.get("status") == "failed"
+                and (name not in pool.accounts or is_incomplete_account(existing.get(name)))}
+        snapshot.unlink()
+        return jobs
+    except (OSError, ValueError):
+        print("[startup] 无法恢复加号记录快照，已保留文件供检查", flush=True)
+        return {}
+
+
+# 后台 jobs（加号/验证），内存态；升级可通过一次性快照保留失败行。
+JOBS: dict[str, dict] = _restore_failed_add_jobs()
+APPLE_LOGINS: dict[str, AppleLoginControl] = {}
+APPLE_ADD_TASKS: dict[str, asyncio.Task] = {}
+# Every add path owns a cancellable task, including queued Google/Cookie retries.
+ADD_JOB_TASKS: dict[str, asyncio.Task] = {}
+ACCOUNT_DELETE_TASKS: dict[str, asyncio.Task] = {}
+DELETING_ACCOUNTS: set[str] = set()
+ACCOUNT_DELETE_ERRORS: dict[str, dict] = {}
+# 账号级「测试生成」任务（内存态）：指定某个账号出片，观察是否成功
+TEST_JOBS: dict[str, dict] = {}
+# 账号登录态自动刷新（防抖：同一账号刷新间隔）
+LAST_CRED_REFRESH: dict[str, float] = {}
+# Login has its own bounded slots; video/probe concurrency remains independent.
+from login_concurrency import slots as ADD_ACCOUNT_SEM
+# 当前占着 ADD_ACCOUNT_SEM 的是谁（面板「加号中」提示排在谁后面；Google 自动重登一次可能要几分钟）
+ADD_SEM_HOLDER = {"what": ""}
+# 浏览器并发压力测试状态（内存态）
+STRESS_RUN: dict = {
+    "status": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "recommended": None,
+    "results": [],
+    "logs": [],
+}
+# 批量操作任务（批量验证等，内存态）
+BATCH_JOBS: dict[str, dict] = {}
+# 批量验证串行执行：验证会开浏览器/打代理，同时跑多批会互相抢资源
+BATCH_VERIFY_SEM = asyncio.Semaphore(1)
+# 批量「你好」探测的并发：默认 1（串行），0 = 不限。
+# 2.1.5 起默认改回串行：上游对"同一出口 IP 短时间多次提交"敏感（实测并发 3 路就会被
+# 710022002 整批拒；2026-10-13 线上 20 个号 6 秒内全发出去，整批被拒）。
+BATCH_PROBE_CONCURRENCY = int(os.getenv("DOLA_HELLO_PROBE_CONCURRENCY", "1"))
+# 每个探测之间的间隔（秒），默认 3 秒错峰。
+BATCH_PROBE_INTERVAL_SECONDS = float(os.getenv("DOLA_HELLO_PROBE_INTERVAL", "3"))
+# 软失败后的退避重试间隔（秒）。这不是并发限制，是防误锁：两次都失败才判风控。
+BATCH_PROBE_RETRY_SECONDS = float(os.getenv("DOLA_HELLO_PROBE_RETRY_WAIT", "4.0"))
+
+
+class _NoLimit:
+    """并发不限时的空信号量（asyncio.Semaphore(0) 会死锁，所以单独给个 no-op）。"""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+# 管理后台会话（token -> 用户信息），重启后需重新登录
+ADMIN_SESSIONS: dict[str, dict] = {}
+ADMIN_SESSION_TTL = 7 * 86400
+
+SIZE_TO_RATIO = {
+    "1280x720": "16:9", "1920x1080": "16:9",
+    "720x1280": "9:16", "1080x1920": "9:16",
+    "1024x1024": "1:1", "1440x1080": "4:3", "1080x1440": "3:4",
+    "1680x720": "21:9", "2520x1080": "21:9",
+}
+VIDEO_MAX_ATTEMPTS = config.VIDEO_MAX_ATTEMPTS  # 0 = 不限次数，在 TASK_DEADLINE 内持续换号
+SUPPORTED_DURATIONS = tuple(config.ALL_DURATIONS)  # (5, 10, 15, 30)
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+RATIO_TO_DIMENSIONS = {
+    "16:9": (1280, 720), "9:16": (720, 1280),
+    "1:1": (1024, 1024), "4:3": (1440, 1080), "3:4": (1080, 1440),
+    "21:9": (1680, 720),
+}
+
+
+def _probe_with_ffprobe(path: str) -> dict | None:
+    """用 ffprobe 读取真实视频元数据；未安装或解析失败返回 None。"""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", "-show_streams", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout or "{}")
+    except Exception:
+        return None
+    stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+    fmt = data.get("format") or {}
+    meta = {}
+    if stream:
+        try:
+            meta["video_width"] = int(stream.get("width") or 0) or None
+            meta["video_height"] = int(stream.get("height") or 0) or None
+        except (TypeError, ValueError):
+            pass
+        dur = stream.get("duration") or fmt.get("duration")
+        try:
+            meta["video_duration"] = float(dur) if dur else None
+        except (TypeError, ValueError):
+            pass
+    bit_rate = fmt.get("bit_rate")
+    try:
+        meta["video_bitrate"] = int(bit_rate) if bit_rate else None
+    except (TypeError, ValueError):
+        pass
+    return {k: v for k, v in meta.items() if v is not None} or None
+
+
+def _video_metadata(local_path: str, duration: int | None, ratio: str | None) -> dict:
+    """出片完成后的视频元数据：优先 ffprobe 真实值，缺失时用任务记录推算。"""
+    meta: dict = {}
+    try:
+        meta["video_size"] = os.path.getsize(local_path)
+    except OSError:
+        pass
+    probed = _probe_with_ffprobe(local_path)
+    if probed:
+        meta.update(probed)
+    else:
+        w, h = RATIO_TO_DIMENSIONS.get(ratio or "", (0, 0))
+        if w and h:
+            meta["video_width"], meta["video_height"] = w, h
+        if duration:
+            meta["video_duration"] = float(duration)
+    if meta.get("video_size") and meta.get("video_duration"):
+        meta["video_bitrate"] = int(meta["video_size"] * 8 / meta["video_duration"])
+    return meta
+
+
+def _task_videos(row: dict) -> list[dict]:
+    try:
+        videos = json.loads(row.get("work_video_results") or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [item for item in videos if isinstance(item, dict) and item.get("video_url")] if isinstance(videos, list) else []
+
+
+async def _completion_fields(task_id: str, result: dict, duration, ratio) -> dict:
+    """Completed-task fields: a downloaded file under /videos/, or a /v/ link to the upstream CDN."""
+    if result.get("videos"):
+        videos = [await _completion_fields(task_id, item, duration, ratio) for item in result['videos']]
+        return {**videos[0], "work_video_results": json.dumps(videos, ensure_ascii=False)}
+    if result.get("delivery") == "link":
+        meta = video_link.meta_from_model(result.get("video_model") or "", result.get("video_size"),
+                                          duration, ratio)
+        return {"video_url": f"{config.PUBLIC_BASE}/v/{task_id}.mp4", "video_link": result["video_url"],
+                "video_link_expires_at": result.get("link_expires_at"),
+                "video_model": result.get("video_model") or "",
+                **{k: v for k, v in meta.items() if v is not None}}
+    meta = await asyncio.to_thread(_video_metadata, result["local_path"], duration, ratio)
+    return {"video_url": f"{config.PUBLIC_BASE}/videos/{Path(result['local_path']).name}", **meta}
+
+
+class KeyConcurrencyLimiter:
+    """按 API Key 限制同时运行的任务；0 表示不限。"""
+
+    def __init__(self):
+        self._condition = asyncio.Condition()
+        self._active: defaultdict[str, int] = defaultdict(int)
+
+    def is_full(self, api_key_hash: str | None, limit: int) -> bool:
+        return bool(api_key_hash) and limit > 0 and self._active[api_key_hash] >= limit
+
+    async def acquire(self, api_key_hash: str | None, limit: int):
+        if not api_key_hash or limit <= 0:
+            return
+        async with self._condition:
+            while self._active[api_key_hash] >= limit:
+                await self._condition.wait()
+            self._active[api_key_hash] += 1
+
+    async def release(self, api_key_hash: str | None):
+        if not api_key_hash:
+            return
+        async with self._condition:
+            if self._active[api_key_hash] > 0:
+                self._active[api_key_hash] -= 1
+            if self._active[api_key_hash] == 0:
+                self._active.pop(api_key_hash, None)
+            self._condition.notify_all()
+
+
+
+key_limiter = KeyConcurrencyLimiter()
+
+
+# ===== 鉴权 =====
+
+
+def _hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _anonymous_client() -> dict:
+    return {
+        "api_key_hash": None,
+        "api_key_name": "匿名调用",
+        "daily_limit": 0,
+        "concurrency_limit": 0,
+        "allowed_durations": list(SUPPORTED_DURATIONS),
+    }
+
+
+def _env_client(key: str) -> dict:
+    return {
+        "api_key_hash": _hash_key(key),
+        "api_key_name": f"环境变量 Key ({key[:8]}…)",
+        "daily_limit": 0,
+        "concurrency_limit": 0,
+        "allowed_durations": list(SUPPORTED_DURATIONS),
+    }
+
+
+def _auth(authorization):
+    """返回本次调用的客户策略；没有任何 Key 配置时保持开发模式免鉴权。"""
+    if not config.API_KEYS and not store.has_enabled_keys():
+        return _anonymous_client()
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token")
+    key = authorization[7:].strip()
+    if not key:
+        raise HTTPException(401, "missing bearer token")
+    if key in config.API_KEYS:
+        return _env_client(key)
+    record = store.get_key(key)
+    if not record or not store.is_key_valid(key):
+        raise HTTPException(401, "invalid api key")
+    store.touch_key(key)
+    return {
+        "api_key_hash": _hash_key(key),
+        "api_key_name": record["name"] or "未命名客户",
+        "daily_limit": record["daily_limit"],
+        "concurrency_limit": record["concurrency_limit"],
+        "allowed_durations": record["allowed_durations"],
+    }
+
+
+def _admin_auth(x_admin_key: str | None):
+    if not x_admin_key:
+        raise HTTPException(401, "请先登录")
+    session = ADMIN_SESSIONS.get(x_admin_key)
+    if not session:
+        # 服务重启后内存里没有了：从库里找回来，面板一键更新后不用重新登录
+        session = user_store.load_session(x_admin_key)
+        if session:
+            ADMIN_SESSIONS[x_admin_key] = session
+    if not session or session.get("expires_at", 0) < time.time():
+        ADMIN_SESSIONS.pop(x_admin_key, None)
+        raise HTTPException(401, "登录已过期，请重新登录")
+    user = user_get(session.get("username", ""))
+    if not user or not user.get("enabled"):
+        ADMIN_SESSIONS.pop(x_admin_key, None)
+        raise HTTPException(401, "账号不可用，请重新登录")
+
+
+def _normalize_allowed_durations(values) -> list[int]:
+    if values is None:
+        return list(SUPPORTED_DURATIONS)
+    try:
+        normalized = sorted({int(value) for value in values})
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"allowed_durations 必须是 {list(SUPPORTED_DURATIONS)} 的数组")
+    if not normalized or any(value not in SUPPORTED_DURATIONS for value in normalized):
+        raise HTTPException(
+            422, f"allowed_durations 只能包含 {list(SUPPORTED_DURATIONS)}，且至少选择一个"
+        )
+    return normalized
+
+
+# ===== 客户 API =====
+
+
+class VideoGenRequest(BaseModel):
+    model: str = "seedance-2.0-fast"
+    prompt: str = Field(..., min_length=1)
+    size: str | None = None
+    ratio: str | None = None
+    execution_mode: Literal["chat", "work", "force15", "auto"] | None = None
+    video_count: Literal[1, 2] = 1
+    duration: int | None = Field(None, ge=4, le=30)
+    # 时长别名：new-api 的 sora/vinted 任务插件会把画布传来的 duration 统一改写成
+    # `seconds` 再转发到本服务，所以这里必须一起认；否则 30 秒请求会被当成「没带时长」
+    # 而落到默认 10 秒（画布「选 30 秒却生成 10 秒」就是这个原因）。
+    seconds: int | None = Field(None, ge=4, le=30)
+    duration_seconds: int | None = Field(None, ge=4, le=30)
+    # 想要的分辨率：720p（或不传）交 Dola 原片；1080p / 2k / 4k 在后台开启自动超分时出片后自动超分
+    resolution: str | None = None
+    # 参考图：兼容各画布工具的常见字段形态（字符串/数组/{"url": ...}）
+    reference_images: list[str] = Field(default_factory=list)
+    reference_audio: list[str] = Field(default_factory=list)
+    # 不传（或 null）= 按 DOLA_DEFAULT_REFERENCE_SOURCE：带参考图默认附加 AI 素材说明，纯文字不附加
+    reference_source: Literal["unspecified", "ai_generated"] | None = None
+    image_url: Any = None
+    image: Any = None
+    input_image: Any = None
+    input_images: Any = None
+
+
+class TestGenRequest(BaseModel):
+    """账号级「测试生成」：用指定账号跑一条真实出片，看该号能否成功。"""
+    prompt: str = Field(..., min_length=1)
+    model: str = "seedance-2.0-fast"
+    duration: int = Field(15, ge=4, le=30)
+    ratio: str | None = None
+    execution_mode: Literal["chat", "work", "force15", "auto"] = "force15"
+    video_count: Literal[1, 2] = 1
+    # 号处于风控/限流暂停/没绑代理等状态时，先返回提醒；确认后带 force=true 再发
+    force: bool = False
+    reference_images: list[str] = Field(default_factory=list)
+    reference_audio: list[str] = Field(default_factory=list)
+
+
+class TaskResponse(BaseModel):
+    id: str
+    status: str
+    model: str | None = None
+    prompt: str | None = None
+    video_url: str | None = None
+    videos: list[dict] | None = None
+    error: str | None = None
+    # 排队/进度说明：客户端可以拿它显示「排队中，预计 N 分钟」。
+    # 字段是附加的（老客户端忽略即可，不影响原有 status/video_url 语义）。
+    progress: dict | None = None
+    # 管理员对这条视频做过超分（upscale.py）后的高清地址；没有超分时为 null。
+    video_url_hd: str | None = None
+    # 服务端认出的请求分辨率（720p / 1080p / 2k / 4k；没写或认不出为 null），以及自动超分的说明
+    resolution: str | None = None
+    upscale_note: str | None = None
+
+
+def _eta_text(seconds: int) -> str:
+    if seconds <= 45:
+        return "不到 1 分钟"
+    minutes = max(1, int(round(seconds / 60.0)))
+    return f"约 {minutes} 分钟"
+
+
+def _global_concurrency_limit() -> int:
+    return int(getattr(pool, 'max_concurrency', config.MAX_CONCURRENCY))
+
+
+def _progress_payload(*, status: str, created_at: float | None, duration: int | None) -> dict:
+    """把排队情况翻译成客户端能直接显示的一句话 + 结构化字段。"""
+    info = store.queue_progress(created_at=created_at, duration=duration)
+    ahead = info["ahead"]
+    running = info["running"]
+    typical = max(30, int(info["typical_seconds"]))
+    workers = _global_concurrency_limit()   # 0 = 不限并发
+    if status == "queued":
+        # 有并发槽时按槽位折算等待；不限并发时任务之间不互相排队
+        batches = (ahead // workers) + 1 if workers > 0 else 1
+        eta = batches * typical
+        message = f"排队中，预计{_eta_text(eta)}"
+        if ahead:
+            message += f"（前面还有 {ahead} 个任务）"
+        else:
+            message += "（等待账号空闲）"
+        state = "queued"
+    elif status == "processing":
+        eta = typical
+        message = f"生成中，预计{_eta_text(eta)}"
+        state = "running"
+    elif status == "completed":
+        eta = 0
+        message = "已完成"
+        state = "done"
+    else:
+        eta = 0
+        message = "生成失败"
+        state = "failed"
+    return {
+        "state": state,
+        "position": ahead + 1 if state == "queued" else None,
+        "ahead": ahead,
+        "running": running,
+        "workers": workers,
+        "typical_seconds": typical,
+        "eta_seconds": int(eta),
+        "eta_text": _eta_text(int(eta)) if eta else "",
+        "message": message,
+    }
+
+
+def _resolve_ratio(size, ratio):
+    if size and size in SIZE_TO_RATIO:
+        return SIZE_TO_RATIO[size]
+    return ratio
+
+
+# dola 网页上 2.0 只有「Seedance 2.0 Fast」（上游值 seedance_v2.0），对外就叫 seedance-2.0-fast；
+# 旧名 seedance-2.0 仍然收（兼容老接法 / new-api 的模型重定向），按 2.0 Fast 处理，但不再列出。
+# 内部的版本标识（计价表 MODEL_COSTS / DURATION_COSTS 的键）保持 "seedance-2.0" 不变。
+DOLA_V20_PUBLIC = "seedance-2.0-fast"
+
+
+def _public_model(version: str) -> str:
+    """内部版本标识 → 对外模型名（落库、返回给调用方、面板显示）。"""
+    return DOLA_V20_PUBLIC if version == "seedance-2.0" else version
+
+
+def _model_version(model) -> str | None:
+    """识别请求里显式声明的 seedance 版本；无法识别返回 None（交给时长规则选择）。"""
+    m = (model or "").lower().replace("_", "-")
+    if "2.5" in m or "2-5" in m:
+        return "seedance-2.5"
+    if "2.0" in m or "2-0" in m or "v2.0" in m:
+        return "seedance-2.0"
+    return None
+
+
+def _resolve_model_for_duration(model, duration) -> str | None:
+    """模型-时长组合归一化；无法组合时返回 None。
+
+    - 请求里写明了 2.5/2.0 版本 → 只允许该版本支持的时长，避免悄悄换型号。
+    - 模型名无法识别（如 __schema_probe_invalid_model__）→ 按时长挑一个能生成的版本：
+      5/10/15 秒走 seedance-2.0，30 秒与非原生时长走 seedance-2.5；
+      10 秒两种都支持时默认 seedance-2.0（消耗点数更低）。
+    """
+    try:
+        duration = int(duration)
+    except (TypeError, ValueError):
+        return None
+    version = _model_version(model)
+    if version is None:
+        if duration in config.V20_DURATIONS:
+            version = "seedance-2.0"
+        else:
+            # 30 秒一直是 2.5；任意时长（非原生档位）也只有 2.5 能出。
+            version = "seedance-2.5"
+    if version == "seedance-2.0" and duration not in config.V20_DURATIONS:
+        return None   # 2.0-fast 只出 V20_DURATIONS 里的档位（2026-10-29 起只剩 5/10 秒）
+    if not _duration_supported(version, duration):
+        return None
+    return version
+
+
+def _supported_durations_for(version: str) -> list[int]:
+    """某个 seedance 版本当前能下发的时长。
+
+    用 config.all_durations() 而不是模块级常量 ALL_DURATIONS：后者是 import 时
+    求值的快照，运行期调整 NATIVE_DURATION_MAX 不会反映出来。
+    """
+    if version == "seedance-2.5":
+        return config.all_durations()
+    return list(config.V20_DURATIONS)
+
+
+def _duration_supported(version: str, duration: int) -> bool:
+    """时长在当前白名单下是否可下发。
+
+    原生档位**永远放行** —— 尤其 30 秒，绝不能被 NATIVE_DURATION_MAX 夹掉
+    （夹了就是把 30 秒片悄悄变成 15 秒片，线上主力流量会崩）。
+    非原生档位只在开了任意时长、落在区间内、且走 2.5 时才放行。
+    """
+    if duration in config.NATIVE_DURATIONS:
+        return True
+    if config.NATIVE_DURATION_MAX <= 0:
+        return False
+    if not (config.MIN_DURATION <= duration <= config.NATIVE_DURATION_MAX):
+        return False
+    return version == "seedance-2.5"
+
+
+def _normalize_model(model: str) -> str:
+    """宽松归一化：显式 2.5 → seedance-2.5，其余一律 seedance-2.0。"""
+    return _model_version(model) or "seedance-2.0"
+
+
+def _duration_cost(model: str, duration: int) -> int:
+    """单次出片消耗的额度点数：只看模型，不看时长（对齐协议的额度口径）。
+
+    未知模型按最贵的 DEFAULT_CREDIT_COST 算。旧实现是「矩阵查不到就返回 1 点」，
+    属于**少扣**：一旦放开任意时长，每个未登记的 (模型, 时长) 组合都会被按 1 点
+    记账，一个号一天能跑 4 条。duration 参数保留仅为兼容调用方签名。
+    """
+    return config.MODEL_COSTS.get(_normalize_model(model), config.DEFAULT_CREDIT_COST)
+
+
+def _pick_duration(requested, allowed: list[int]) -> int:
+    """把 Ark 请求的时长映射到允许档位，优先取不小于请求值的档位。"""
+    try:
+        requested = max(1, int(requested or 0))
+    except (TypeError, ValueError):
+        requested = 10
+    allowed = sorted(allowed) or list(SUPPORTED_DURATIONS)
+    for duration in allowed:
+        if duration >= requested:
+            return duration
+    return allowed[-1]
+
+
+def _normalize_image_refs(*fields) -> list[str]:
+    """兼容各画布工具常见的图片字段形态（字符串/列表/{"url": ...}）。"""
+    out: list[str] = []
+    for value in fields:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                out.append(value.strip())
+        elif isinstance(value, dict):
+            url = value.get("url")
+            if isinstance(url, str) and url.strip():
+                out.append(url.strip())
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    out.append(item.strip())
+                elif isinstance(item, dict):
+                    url = item.get("url")
+                    if isinstance(url, str) and url.strip():
+                        out.append(url.strip())
+    seen = set()
+    return [u for u in out if not (u in seen or seen.add(u))]
+
+
+def _deep_image_urls(value, out: list[str] | None = None, depth: int = 0) -> list[str]:
+    """递归抓取请求里任意层级的图片 URL（兼容画布工具的各种嵌套格式）。"""
+    if out is None:
+        out = []
+    if depth > 8 or len(out) >= 20 or value is None:
+        return out
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith(("http://", "https://", "data:image/")) and s not in out:
+            out.append(s)
+        return out
+    if isinstance(value, dict):
+        keys = [str(k).lower() for k in value]
+        has_image_ctx = (
+            any("image" in k or "ref" in k or "参考" in k for k in keys)
+            or "image" in str(value.get("type", "")).lower()
+        )
+        for k, v in value.items():
+            kk = str(k).lower()
+            if isinstance(v, str):
+                s = v.strip()
+                if ((has_image_ctx or kk in ("url", "uri", "image", "image_url", "file_url", "src"))
+                        and s.startswith(("http://", "https://", "data:image/")) and s not in out):
+                    out.append(s)
+            elif isinstance(v, (dict, list)):
+                _deep_image_urls(v, out, depth + 1)
+        return out
+    if isinstance(value, list):
+        for x in value:
+            _deep_image_urls(x, out, depth + 1)
+    return out
+
+
+RESOLUTION_KEYS = ("resolution", "quality", "video_resolution", "output_resolution",
+                   "video_quality", "definition")
+RESOLUTION_NESTS = ("metadata", "extra_body", "parameters", "params", "options", "config",
+                    "generation_config", "extra", "input", "settings")
+_RESOLUTION_FLAG = re.compile(r"(?:^|\s)--(?:resolution|rs)\s+(\S+)")
+
+
+def _request_resolution(raw, prompt: str = "") -> tuple[str | None, str, str]:
+    """请求里要的分辨率 → (原始写法, 去掉 --resolution 后的提示词, 来源字段)。
+
+    客户端放的位置五花八门：顶层 resolution / quality，new-api 之类塞在 metadata / extra_body，
+    也有写在提示词里的 --resolution 1080p / --rs 1080p（这段从提示词去掉，不发给 dola）。
+    只认 upscale.normalize_resolution 认得出的值；认不出的（如 quality=high）当没写。
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    places = [("", raw)] + [(f"{nest}.", raw[nest]) for nest in RESOLUTION_NESTS
+                            if isinstance(raw.get(nest), dict)]
+    for prefix, place in places:
+        for key in RESOLUTION_KEYS:
+            value = place.get(key)
+            if isinstance(value, (str, int)) and upscale.normalize_resolution(value):
+                return str(value), _strip_resolution_flag(prompt), prefix + key
+    flag = _RESOLUTION_FLAG.search(prompt or "")
+    if flag and upscale.normalize_resolution(flag.group(1)):
+        return flag.group(1), _strip_resolution_flag(prompt), "prompt --resolution"
+    return None, prompt, ""
+
+
+def _nested_value(raw, keys) -> str | None:
+    """顶层优先，再找 metadata / extra_body 等常见嵌套位置里的同名字段（比例、尺寸）。"""
+    raw = raw if isinstance(raw, dict) else {}
+    places = [raw] + [raw[nest] for nest in RESOLUTION_NESTS if isinstance(raw.get(nest), dict)]
+    for place in places:
+        for key in keys:
+            value = place.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _strip_resolution_flag(prompt: str) -> str:
+    flag = _RESOLUTION_FLAG.search(prompt or "")
+    return (prompt[:flag.start()] + prompt[flag.end():]).strip() if flag else prompt
+
+
+def _log_request_fields(raw, endpoint: str, resolution: str | None, source: str) -> None:
+    """每次创建任务记一行：收到了哪些字段（只记字段名）、认出的分辨率——排查「要了 1080p 却是 720p」。"""
+    if not isinstance(raw, dict):
+        return
+    keys = sorted(str(k) for k in raw.keys())
+    nested = {k: sorted(str(x) for x in raw[k].keys()) for k in RESOLUTION_NESTS if isinstance(raw.get(k), dict)}
+    print(f"[api] {endpoint} 字段 {keys}" + (f" 嵌套 {nested}" if nested else "")
+          + f" · 分辨率 {resolution + '（' + source + '）' if resolution else '未指定'}", flush=True)
+
+
+def _log_image_fields(raw, endpoint: str) -> None:
+    """把疑似带图的请求原始结构打日志，便于定位画布工具实际传图字段。"""
+    if not isinstance(raw, dict):
+        return
+    try:
+        sample = json.dumps(raw, ensure_ascii=False)
+    except Exception:
+        return
+    markers = ('"image', "image_url", '"url"', '"content"', '"input', 'data:image', 'reference')
+    if not any(m in sample for m in markers):
+        return
+    keys = sorted(str(k) for k in raw.keys())
+    print(
+        f"[imgreq] {endpoint} top_keys={json.dumps(keys, ensure_ascii=False)} "
+        f"sample={sample[:700]}",
+        flush=True,
+    )
+
+
+def _map_ark_ratio(ratio) -> str | None:
+    """Ark 的 ratio 直接透传；adaptive/未知值回落 dola 默认。"""
+    if not ratio:
+        return None
+    value = str(ratio).strip().lower()
+    if value in ("adaptive", "auto", "default"):
+        return None
+    return value if value in {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"} else None
+
+
+async def _wait_update_drain(task_id: str) -> None:
+    """面板一键更新排空期间不派新单：任务留在排队里，更新完成（或重启后重新受理）再继续。
+
+    每分钟刷新一次 updated_at，排队时钟不算更新耗时，看门狗不会把它判成排队超时。
+    """
+    noted = 0.0
+    held = False
+    while updater.draining():
+        held = True
+        if time.time() - noted > 60:
+            store.update(task_id, queue_note="排队中：服务正在更新版本，完成后自动开始")
+            noted = time.time()
+        await asyncio.sleep(3)
+    if held:
+        store.update(task_id, queue_note="")
+
+
+async def _run_task(task_id, model, prompt, ratio, duration, reference_images, client):
+    api_key_hash = client.get("api_key_hash")
+    acquired = False
+    reference_root = audio_root = None
+    audio_urls = []
+    try:
+        task_row = store.get(task_id) or {}
+        audio_urls = _task_reference_images(task_row.get("reference_audio"))
+        execution_mode = task_row.get("execution_mode") or "auto"
+        video_count = int(task_row.get("video_count") or 1)
+        pair_context = _pair_state(task_row)
+        if pair_context.get("pending") or pair_context.get("active"):
+            store.update(task_id, status="failed", error="服务中断后正在取回工作模式原会话", finished_at=time.time())
+            _maybe_start_recovery(task_id, TimeoutError("工作模式等待超时"))
+            return
+        # 重新受理：排队时钟（updated_at）与上一轮的报错一起清零。看门狗按「最后一次状态
+        # 变化」算排队时长，不清零的话刚被重启捞回来的任务会带着旧的 updated_at 立刻被判
+        # 「排队超时」——把刚修好的恢复路径又堵死。
+        store.update(task_id, status="queued", error="", queue_note="")
+        await _wait_update_drain(task_id)
+        key_limit = int(client.get("concurrency_limit", 0) or 0)
+        if key_limiter.is_full(api_key_hash, key_limit):
+            store.set_queue_note(task_id, f"排队中：这个客户（API Key）同时最多跑 {key_limit} 个任务，"
+                                          "前面的还没跑完")
+        try:
+            await asyncio.wait_for(key_limiter.acquire(api_key_hash, key_limit),
+                                   timeout=max(1, config.MAX_QUEUE_WAIT_SECONDS))
+        except TimeoutError:
+            raise RuntimeError("客户并发名额排队超时，尚未提交生成")
+        acquired = True
+        # 这里不能急着标 processing：接下来 pool.generate_video 还可能在全局并发槽 /
+        # 账号锁上等待，那段等待必须让客户端看到 queued（排队中）。真正拿到账号
+        # （= 拿到并发槽）的那一刻由下面的 on_account_try 置为 processing。
+
+        def on_conversation_id(account, conversation_id, deadline_at):
+            store.update(task_id, status="processing", account=account,
+                         conversation_id=conversation_id, deadline_at=deadline_at,
+                         queue_note="已取得上游会话，正在查询视频结果",
+                         last_poll_at=time.time())
+            if current_attempt is not None:
+                current_attempt["conversation_id"] = conversation_id
+                save_history()
+
+        def on_pair_state(state):
+            store.update(task_id, work_pair_state=json.dumps(state, ensure_ascii=False))
+
+        # 每个号的 dola 回执原话（按尝试顺序），面板把当前号显示在前、其它号折叠
+        note_state: dict = {"account": None, "notes": []}
+        try:
+            history = json.loads((store.get(task_id) or {}).get("attempt_history") or "[]")
+        except (ValueError, TypeError):
+            history = []
+        current_attempt = None
+
+        def save_history():
+            del history[:-100]
+            payload = json.dumps(history, ensure_ascii=False)
+            while len(payload.encode('utf-8')) > 65536 and len(history) > 1:
+                history.pop(0)
+                payload = json.dumps(history, ensure_ascii=False)
+            store.update(task_id, attempt_history=payload)
+
+        def on_attempt_end(account, attempt, started, error):
+            if current_attempt is not None:
+                current_attempt.update(finished_at=time.time(), error=redact_error(error),
+                                       outcome="failed" if error else "completed")
+                save_history()
+
+        def on_poll(now, note=None, wait_seconds=None, progress=None):
+            fields = {"last_poll_at": now}
+            if progress:
+                # 号池自己的进度说明（如「30 秒：等第 1 段出片」）：进「⏳」行，不当成 dola 原话
+                store.set_queue_note(task_id, progress)
+                if current_attempt is not None and current_attempt.get("stage") != progress:
+                    current_attempt["stage"] = redact_error(progress)[:240]
+                    current_attempt.setdefault("stages", []).append({"at": now, "stage": redact_error(progress)[:240]})
+                    current_attempt["stages"] = current_attempt["stages"][-12:]
+                    save_history()
+            if note:
+                fields["upstream_note"] = note        # dola 回执原话（含「预计等待 N 分钟」）
+                acc = note_state["account"] or ""
+                notes = note_state["notes"]
+                if notes and notes[-1]["account"] == acc:
+                    notes[-1]["note"] = note
+                else:
+                    notes.append({"account": acc, "note": note, "at": now})
+                fields["upstream_notes"] = json.dumps(notes, ensure_ascii=False)
+            if wait_seconds:
+                fields["upstream_wait"] = int(wait_seconds)
+            store.update(task_id, **fields)
+
+        tried_accs: list[str] = []
+
+        def on_account_try(account, attempt):
+            nonlocal current_attempt
+            # 拿到账号即拿到并发槽 —— 此刻才算真正开始生成（等待期间保持 queued）。
+            tried_accs.append(account)
+            note_state["account"] = account
+            current_attempt = {"account": account, "attempt": attempt, "started_at": time.time(),
+                               "stage": "准备生成", "outcome": "running", "stages": []}
+            history.append(current_attempt)
+            save_history()
+            fields = dict(status="processing", account=account, attempt=attempt, queue_note="",
+                          conversation_id=None,
+                          attempted_accounts=json.dumps(tried_accs, ensure_ascii=False),
+                          last_poll_at=time.time(),
+                          # 换号：预计等待清空、本号计时从现在起（倒计时不沿用上一个号的）
+                          attempt_started_at=time.time(), upstream_wait=None)
+            if sites.is_doubao_model(model):
+                fields["execution_mode"] = pool.execution_mode_for(account, execution_mode)
+            if len(tried_accs) == 1:
+                # started_at 只记首次尝试，否则换号会把出片耗时均值（ETA）拉长
+                fields["started_at"] = time.time()
+            store.update(task_id, **fields)
+
+        reference_root, reference_paths = await download_reference_images(
+            [] if pair_context.get("first") else reference_images or [], task_id)
+        audio_root, audio_paths = await reference_audio.download(audio_urls, task_id)
+        if sum(Path(p).stat().st_size for p in reference_paths + audio_paths) > config.REFERENCE_TOTAL_MAX_BYTES:
+            raise ValueError('参考图片及音频总量超过限制')
+        if reference_paths:
+            # 趁原图还在（终态会被清理）先存一份缩略图，供面板回看
+            thumbs = await asyncio.to_thread(
+                save_reference_thumbnails, reference_paths, task_id)
+            if thumbs:
+                store.update(task_id, reference_thumbs=json.dumps(thumbs))
+        # 任务总时限内持续换号；到点不再派发新尝试。兜底超时额外留一次完整出片的等待时间，
+        # 避免把已经在 Dola 端生成中的那一次强行中断（会白扣额度）。
+        # 兜底总超时要容得下「最后一次出片」的完整等待：纯 API 会跟着上游「预计等待」
+        # 放长到 DOLA_PURE_TIMEOUT_MAX，这里若只留 VIDEO_TIMEOUT（300 秒）会把它半路掐断。
+        # 出片等待跟着 dola 的预计动态放长，最长 WAIT_HARD_MAX：兜底总超时要容得下
+        last_attempt_wait = max(config.VIDEO_TIMEOUT, config.PURE_API_TIMEOUT,
+                                config.PURE_API_TIMEOUT_MAX, config.WAIT_HARD_MAX,
+                                config.WORK_15S_TIMEOUT)
+        if int(duration or 0) > 15 and config.LONG_VIDEO_MODE == "pair":
+            # 30 秒每次出片最多等 LONG_VIDEO_TIMEOUT_MAX；只出了半截还要补后半段：最多等两次
+            last_attempt_wait = 2 * max(last_attempt_wait, config.LONG_VIDEO_TIMEOUT_MAX)
+        overall_timeout = config.TASK_DEADLINE + last_attempt_wait + 60
+        # Global-slot waiting has its own clock. Dispatch starts the attempt budget.
+        timeout_scope = asyncio.timeout(max(1, config.MAX_QUEUE_WAIT_SECONDS))
+        dispatched = False
+        def on_dispatch():
+            nonlocal dispatched
+            if (store.get(task_id) or {}).get("status") not in ("queued", "processing"):
+                raise RuntimeError("任务已结束，不再提交生成")
+            dispatched = True
+            timeout_scope.reschedule(asyncio.get_running_loop().time() + overall_timeout)
+        try:
+            async with timeout_scope:
+                result = await pool.generate_video(
+                    dispatch_prompt(prompt, (store.get(task_id) or {}).get("prompt_supplement") or "", ratio),
+                    ratio, duration, model,
+                    on_conversation_id=on_conversation_id, on_poll=on_poll,
+                    reference_image_paths=reference_paths, reference_audio_paths=audio_paths,
+                    on_account_try=on_account_try, max_attempts=VIDEO_MAX_ATTEMPTS,
+                    attempt_timeout=config.TASK_DEADLINE, on_dispatch=on_dispatch,
+                    on_attempt_end=on_attempt_end, on_pair_state=on_pair_state, pair_state=pair_context or None,
+                    on_wait=lambda note: store.set_queue_note(task_id, note), execution_mode=execution_mode,
+                    video_count=video_count)
+        except TimeoutError:
+            # TimeoutError is also raised by upload/navigation/polling. Preserve that
+            # stage-specific error unless THIS outer timeout actually expired.
+            if not timeout_scope.expired():
+                raise
+            if not dispatched and not tried_accs:
+                raise RuntimeError(f"排队等待超过 {config.MAX_QUEUE_WAIT_SECONDS // 60} 分钟，尚未提交生成")
+            chain = "、".join(tried_accs) or "无"
+            raise RuntimeError(
+                f"等待出片超过 {overall_timeout // 60} 分钟仍未完成，任务失败（已尝试账号: {chain}）")
+        # ffprobe 是同步子进程，_completion_fields 在线程里跑它；直链交付不下载、不 ffprobe。
+        fields = await _completion_fields(task_id, result, duration, ratio)
+        store.update(task_id, status="completed",
+                     queue_note="",
+                     account=result.get("account"), last_poll_at=time.time(),
+                     finished_at=time.time(), **fields)
+        if _pair_state(store.get(task_id) or {}).get("pending"):
+            _maybe_start_recovery(task_id, TimeoutError("工作模式分段原会话待核对"))
+        # 出片目录超限就从旧到新删，避免磁盘被撑满（同样是同步目录遍历）
+        await asyncio.to_thread(_prune_downloads)
+    except (AllAccountsLimitedError, AllAccountsQuotaBlockedError) as e:
+        store.update(task_id, status="failed", error=failure_text.summarize(str(e)),
+                     failure_code="429", finished_at=time.time())
+    except asyncio.CancelledError:
+        # 服务重启/任务被取消：CancelledError 不是 Exception，别把它吞了，
+        # 但也别把行留在 processing —— 退回 queued，下次启动或看门狗会接上。
+        # 已经提交过上游的（有会话）保留账号：重启后接着等原会话，不重新提交、不再扣点；
+        # 还没提交的才清空账号重新派号。
+        cur = store.get(task_id) or {}
+        if cur.get("conversation_id") and cur.get("account"):
+            store.update(task_id, status="queued", last_poll_at=0,
+                         error="任务被中断（服务重启），重启后接着等 dola 原会话")
+        else:
+            store.update(task_id, status="queued", account=None, last_poll_at=0,
+                         error="任务被中断（服务重启），已重新排队")
+        raise
+    except Exception as e:
+        if getattr(e, "result", None):
+            fields = await _completion_fields(task_id, e.result, duration, ratio)
+            store.update(task_id, **fields)
+        store.update(task_id, status="failed", error=failure_text.summarize(str(e)),
+                     finished_at=time.time())
+        try:
+            _maybe_start_recovery(task_id, e)
+        except Exception as exc:  # noqa: BLE001 - 取回只是补救，不能影响失败落库
+            print(f"[recover] {task_id} 启动自动取回失败: {exc}", flush=True)
+    finally:
+        if 'current_attempt' in locals() and current_attempt is not None and current_attempt.get("outcome") == "running":
+            final_row = store.get(task_id) or {}
+            current_attempt.update(finished_at=time.time(), outcome=final_row.get("status", "interrupted"),
+                                   error=redact_error(final_row.get("error") or ""))
+            save_history()
+        if reference_root:
+            shutil.rmtree(reference_root, ignore_errors=True)
+        if audio_root:
+            shutil.rmtree(audio_root, ignore_errors=True)
+        # 落盘的参考图只在任务**走到终态**时清理：任务被取消/服务重启时它还要留给
+        # resume 用（库里存的是路径，文件删早了恢复时就报「参考图文件已丢失」）。
+        row = store.get(task_id)
+        if row and row.get("status") in ("completed", "failed"):
+            cleanup_local_references((reference_images or []) + audio_urls)
+            store.update(task_id, reference_images="[]", reference_audio="[]")
+            if row.get("work_pair_state") and row.get("recover_state") != "watching":
+                pool.discard_work_pair(_pair_state(row))
+        if acquired:
+            await key_limiter.release(api_key_hash)
+
+
+# ===== 超时任务自动取回 =====
+RECOVERING: set[str] = set()
+
+
+def _is_wait_timeout(exc: BaseException) -> bool:
+    """「上游接单了、只是我们等到上限没出片」这一类失败（才值得后台继续盯）。"""
+    if isinstance(exc, TimeoutError):
+        return True
+    text = str(exc)
+    return "等待出片超时" in text or "等待出片超过" in text or "强开15s" in text and ("超时" in text or "连接中断" in text)
+
+
+def _is_work_task(row: dict) -> bool:
+    return row.get("execution_mode") == "force15" or work_reply.is_work_request(row.get("model"), row.get("duration"), row.get("execution_mode") or "auto")
+
+
+def _is_work_pair_task(row: dict) -> bool:
+    return _is_work_task(row) and row.get("execution_mode") != "work" and int(row.get("duration") or 0) == 30
+
+
+def _maybe_start_recovery(task_id: str, exc: BaseException) -> bool:
+    """超时原会话继续取回；工作模式分段重试留下的会话也继续核对额度。"""
+    row = store.get(task_id) or {}
+    work = _is_work_task(row)
+    pair = _pair_state(row)
+    if config.RECOVER_TIMEOUT_SECONDS <= 0 or not (_is_wait_timeout(exc) or work and pair.get("pending")):
+        return False
+    account, conv = row.get("account"), row.get("conversation_id")
+    if work and (pair.get("pending") or pair.get("active")) and (not account or not conv):
+        target = pair.get("active") or pair["pending"][0]
+        account, conv = target["account"], target["conversation_id"]
+        if row.get("status") != "completed":
+            store.update(task_id, account=account, conversation_id=conv)
+    if not account or not conv or not (work or pool.is_pure_account(account)):
+        return False
+    if _is_work_pair_task(row):
+        pending = pair.setdefault("pending", [])
+        target = pair.get("active")
+        if not target and not pending:
+            target = {"account": account, "conversation_id": conv, "segment": pair.get("segment", 0),
+                      "submitted_at": row.get("attempt_started_at") or row.get("started_at")}
+        if target and not any(item.get("conversation_id") == target["conversation_id"]
+                   and item.get("account") == target["account"] for item in pending):
+            pending.append({**target, "suspect_at": time.time()})
+        store.update(task_id, work_pair_state=json.dumps(pair, ensure_ascii=False))
+    until = time.time() + config.RECOVER_TIMEOUT_SECONDS
+    store.update(task_id, recover_state="watching", recover_until=until)
+    print(f"[recover] {task_id}（{account}）等待超时，后台继续盯会话 {conv}，"
+          f"最多 {config.RECOVER_TIMEOUT_SECONDS // 60} 分钟", flush=True)
+    asyncio.create_task(_recover_loop(task_id))
+    return True
+
+
+async def _recover_loop(task_id: str) -> None:
+    """后台盯守一个超时任务的 dola 会话：出片就下载并把任务改成「完成」。只查询不提交。"""
+    if task_id in RECOVERING:
+        return
+    RECOVERING.add(task_id)
+    try:
+        initial = store.get(task_id) or {}
+        if _is_work_task(initial):
+            await _recover_work_loop(task_id)
+            return
+        while True:
+            row = store.get(task_id)
+            if not row or row.get("recover_state") != "watching":
+                return
+            if time.time() > float(row.get("recover_until") or 0):
+                store.update(task_id, recover_state="gave_up")
+                print(f"[recover] {task_id} 盯守到期仍未出片，放弃", flush=True)
+                return
+            account, conv = row["account"], row["conversation_id"]
+            res = None
+            if pool.egress_throttle_remaining(account) <= 0:   # 出口被限流时这一轮先不查
+                try:
+                    res = await asyncio.to_thread(pool.fetch_conversation_video, account, conv,
+                        **({"reference_count": len(_task_reference_thumbs(row.get("reference_thumbs"))),
+                            "duration": row.get("duration"), "ratio": row.get("ratio")}
+                           if sites.is_doubao_model(row.get("model")) else {}))
+                except Exception as exc:  # noqa: BLE001 - 单次查询失败下一轮再试
+                    print(f"[recover] {task_id} 查询失败（稍后再试）: {str(exc)[:160]}", flush=True)
+            if res and res.get("local_path"):
+                public_url = f"{config.PUBLIC_BASE}/videos/{Path(res['local_path']).name}"
+                meta = await asyncio.to_thread(_video_metadata, res["local_path"],
+                                               row.get("duration"), row.get("ratio"))
+                try:
+                    pool.claim_recovered(account, row.get("model") or "", row.get("duration"), res)
+                except Exception as exc:  # noqa: BLE001 - 记账失败不影响交付
+                    print(f"[recover] {task_id} 记账失败: {exc}", flush=True)
+                store.update(task_id, status="failed" if res.get("validation_error") else "completed",
+                             video_url=public_url, error=res.get("validation_error") or "",
+                             failure_code=None, recover_state="gave_up" if res.get("validation_error") else "recovered",
+                             recovered_at=time.time(), finished_at=time.time(), **meta)
+                outcome = "成片不符合请求，已保留原片" if res.get("validation_error") else "已自动取回"
+                print(f"[recover] {task_id} {outcome} → {public_url}", flush=True)
+                await asyncio.to_thread(_prune_downloads)
+                return
+            if res and res.get("final"):
+                if res.get("plan_unavailable"):
+                    pool._mark_abnormal(account, res.get("detail") or "豆包套餐不支持创作")
+                upstream = "豆包" if sites.is_doubao_model(row.get("model")) else "dola"
+                note = f"；后台取回结束：{upstream} 最终状态 {res.get('status')}（{(res.get('detail') or '')[:80]}）"
+                store.update(task_id, recover_state="gave_up",
+                             error=failure_text.summarize((row.get("error") or "") + note))
+                print(f"[recover] {task_id} 上游已判定 {res.get('status')}，停止盯守", flush=True)
+                return
+            await asyncio.sleep(max(1, config.RECOVER_INTERVAL_SECONDS))
+    finally:
+        RECOVERING.discard(task_id)
+
+
+def _pair_state(row: dict) -> dict:
+    try:
+        value = json.loads(row.get("work_pair_state") or "{}")
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _record_work_recovery(task_id: str, target: dict, *, final_error: str | None = None) -> None:
+    row = store.get(task_id) or {}
+    try:
+        history = json.loads(row.get("attempt_history") or "[]")
+    except (TypeError, ValueError):
+        history = []
+    item = next((item for item in reversed(history) if item.get("account") == target["account"]
+                 and item.get("conversation_id") in (None, target["conversation_id"])), None)
+    if item is None:
+        item = {"account": target["account"], "conversation_id": target["conversation_id"],
+                "started_at": target.get("submitted_at") or row.get("started_at") or time.time()}
+        history.append(item)
+    if item.get("error"):
+        item["timeout_error"] = item["error"]
+    item.update(outcome="completed" if final_error is None else "failed",
+                error=redact_error(final_error) if final_error is not None else "",
+                recovered=final_error is None, recovery_final=True, finished_at=time.time())
+    store.update(task_id, attempt_history=json.dumps(history, ensure_ascii=False))
+
+
+async def _continue_recovered_pair(task_id: str, state: dict, result: dict) -> dict:
+    """第一段迟到后继续原 30 秒订单，已完成的第一段不重做。"""
+    row = store.get(task_id)
+    state["first"] = {"account": result["account"], "local_path": await pool._local_video(result),
+                      "conversation_id": result.get("conversation_id")}
+    state["continuation_started"] = True
+
+    def saved(value):
+        store.update(task_id, work_pair_state=json.dumps(value, ensure_ascii=False))
+
+    def poll(now, **fields):
+        store.update(task_id, last_poll_at=now)
+        if fields.get("progress"):
+            store.set_queue_note(task_id, fields["progress"])
+
+    def tried(account, attempt):
+        current = store.get(task_id)
+        history = json.loads(current.get("attempt_history") or "[]")
+        history.append({"account": account, "started_at": time.time(), "outcome": "running", "stages": []})
+        store.update(task_id, account=account, conversation_id=None, attempt_started_at=time.time(),
+                     attempt_history=json.dumps(history, ensure_ascii=False))
+
+    def acknowledged(account, conv, deadline):
+        current = store.get(task_id)
+        history = json.loads(current.get("attempt_history") or "[]")
+        if history:
+            history[-1]["conversation_id"] = conv
+        store.update(task_id, account=account, conversation_id=conv, deadline_at=deadline,
+                     attempt_history=json.dumps(history, ensure_ascii=False))
+
+    def ended(account, attempt, started, error):
+        current = store.get(task_id)
+        history = json.loads(current.get("attempt_history") or "[]")
+        if history:
+            history[-1].update(outcome="failed" if error else "completed", error=redact_error(error),
+                               finished_at=time.time())
+        store.update(task_id, attempt_history=json.dumps(history, ensure_ascii=False))
+
+    saved(state)
+    await key_limiter.acquire(row.get("api_key_hash"), int(row.get("client_concurrency_limit") or 0))
+    try:
+        return await pool.generate_work_pair(
+            dispatch_prompt(row["prompt"], row.get("prompt_supplement") or "", row.get("ratio")),
+            None if row.get("ratio") == "default" else row.get("ratio"), row["model"],
+            pair_state=state, on_pair_state=saved, on_poll=poll,
+            on_wait=lambda note: store.set_queue_note(task_id, note),
+            on_account_try=tried, on_conversation_id=acknowledged, on_attempt_end=ended,
+            max_attempts=VIDEO_MAX_ATTEMPTS, attempt_timeout=config.TASK_DEADLINE)
+    finally:
+        await key_limiter.release(row.get("api_key_hash"))
+
+
+async def _recover_work_loop(task_id: str) -> None:
+    """工作模式只读轮询；30 秒保留分段上下文，已交付后的迟到片只核对额度。"""
+    await asyncio.sleep(max(0, config.RECOVER_INTERVAL_SECONDS))
+    while True:
+        row = store.get(task_id)
+        if not row or row.get("recover_state") != "watching":
+            return
+        pair = _is_work_pair_task(row)
+        state = _pair_state(row)
+        if not pair and row.get("status") == "completed":
+            store.update(task_id, recover_state="recovered" if row.get("recovered_at") else "checked")
+            return
+        if time.time() >= float(row.get("recover_until") or 0):
+            store.update(task_id, recover_state="recovered" if row.get("recovered_at") else
+                         "checked" if row.get("status") == "completed" else "gave_up")
+            pool.discard_work_pair(state)
+            return
+        targets = state.get("pending", []) if pair else [{
+            "account": row["account"], "conversation_id": row["conversation_id"],
+            "submitted_at": row.get("attempt_started_at") or row.get("started_at") or row.get("created_at"),
+            "suspect_at": float(row["recover_until"]) - config.RECOVER_TIMEOUT_SECONDS}]
+        if pair and not targets and state.get("active") and row.get("status") != "completed":
+            targets = state["pending"] = [dict(state["active"], suspect_at=time.time())]
+        for target in list(targets):
+            if time.time() >= float(row["recover_until"]):
+                break
+            account, conv = target["account"], target["conversation_id"]
+            if pool.egress_throttle_remaining(account) > 0:
+                continue
+            try:
+                async with asyncio.timeout(max(.1, float(row["recover_until"]) - time.time())):
+                    res = target.get("result") or await pool.fetch_work_conversation_video(
+                        account, conv, model=row.get("model") or "seedance-2.0",
+                        duration=work_reply.WORK_DURATION if pair else row.get("duration"),
+                        video_count=int(row.get("video_count") or 1), execution_mode=row.get("execution_mode") or "auto",
+                        **({"reference_count": len(_task_reference_thumbs(row.get("reference_thumbs"))),
+                            "ratio": row.get("ratio")}
+                           if sites.is_doubao_model(row.get("model")) else {}))
+                if res.get("local_path") or res.get("video_url"):
+                    res.update(account=account, conversation_id=conv, submitted_at=target.get("submitted_at"),
+                               execution_mode=row.get("execution_mode") or "auto")
+                    if not target.get("quota_claimed"):
+                        pool.claim_recovered(account, row.get("model") or "", row.get("duration"), res)
+                        _record_work_recovery(task_id, target)
+                        target["quota_claimed"] = True
+                    if res.get("duration_error") or res.get("validation_error"):
+                        fields = await _completion_fields(task_id, res, row.get("duration"), row.get("ratio"))
+                        store.update(task_id, status="failed", recover_state="gave_up", error=res.get("validation_error") or res["duration_error"],
+                                     finished_at=time.time(), **fields)
+                        return
+                    if row.get("status") == "completed":
+                        if res.get("local_path"):
+                            Path(res["local_path"]).unlink(missing_ok=True)
+                        targets.remove(target)
+                        continue
+                    if pair:
+                        target["result"] = {key: res.get(key) for key in ("account", "conversation_id", "local_path")}
+                        if not target["result"]["local_path"]:
+                            target["result"]["local_path"] = await pool._local_video(res)
+                        res["local_path"] = target["result"]["local_path"]
+                        store.update(task_id, work_pair_state=json.dumps(state, ensure_ascii=False))
+                    if pair:
+                        if target.get("segment") == 1:
+                            targets.remove(target)
+                            res = await _continue_recovered_pair(task_id, state, res)
+                        elif target.get("segment") == 2:
+                            res = await pool.finish_work_pair(state, res)
+                            targets.remove(target)
+                        else:
+                            targets.remove(target)
+                            store.update(task_id, error="已找到迟到片段并记录额度；旧 30 秒任务缺少分段资料，无法拼接交付")
+                            continue
+                    fields = await _completion_fields(task_id, res, row.get("duration"), row.get("ratio"))
+                    store.update(task_id, status="completed", account=res.get("account"), error="", queue_note="",
+                                 failure_code=None, recover_state="watching" if pair else "recovered",
+                                 recovered_at=time.time(), finished_at=time.time(), **fields)
+                    print(f"[recover] {task_id} 工作模式已自动取回", flush=True)
+                    if not pair:
+                        await asyncio.to_thread(_prune_downloads)
+                        return
+                    row = store.get(task_id)
+                elif res.get("final"):
+                    if res.get("work_quota_blocked"):
+                        pool._mark_work_blocked(account, res.get("work_limit_until"), res.get("detail") or "")
+                    elif res.get("doubao_quota_blocked"):
+                        from doubao_gen import quota_recover_at
+                        pool._mark_daily_limit(account, res.get("detail") or "", until=quota_recover_at(res.get("detail") or ""))
+                    elif res.get("doubao_plan_unavailable"):
+                        pool._mark_abnormal(account, res.get("detail") or "")
+                    pool.clear_work_suspect(account, before=target.get("suspect_at"))
+                    _record_work_recovery(task_id, target, final_error=res.get("detail") or "原会话已明确结束，未生成视频")
+                    if pair:
+                        targets.remove(target)
+                    else:
+                        store.update(task_id, recover_state="gave_up", error=failure_text.summarize(
+                            (row.get("error") or "") + "；原会话已明确结束：" + (res.get("detail") or "")))
+                        return
+            except Exception as exc:
+                print(f"[recover] {task_id} 工作模式查询或交付稍后重试：{redact_error(exc)[:160]}", flush=True)
+        if pair:
+            store.update(task_id, work_pair_state=json.dumps(state, ensure_ascii=False))
+            if not targets:
+                current = store.get(task_id)
+                store.update(task_id, recover_state="recovered" if current.get("recovered_at") else
+                             "checked" if current.get("status") == "completed" else "gave_up")
+                pool.discard_work_pair(state)
+                return
+        await asyncio.sleep(max(1, config.RECOVER_INTERVAL_SECONDS))
+
+
+RESUMING: set[str] = set()
+
+
+async def _resume_pure_conversation(row: dict) -> None:
+    """cookie 号的任务已经提交过 dola（有会话）：重启 / 看门狗接手后**接着等原会话**，只查询不提交。
+
+    以前这里按原参数重新受理 —— 2026-10-14 AWS 升级重启：acc48 的 30 秒单被重新提交，
+    同一单扣了两次点、出两条片。现在：每 RESUME_POLL_SECONDS 用这个号查一次原会话，
+    出片就下载交付；dola 明确失败就记失败；到出片时限还没出，就转进「超时后台取回」继续盯。
+    """
+    task_id = row["id"]
+    if task_id in RESUMING or task_id in RECOVERING:
+        return
+    RESUMING.add(task_id)
+    account, conv = row["account"], row["conversation_id"]
+    duration = int(row.get("duration") or 0)
+    now = time.time()
+    deadline = float(row.get("deadline_at") or 0)
+    until = deadline if deadline > now + 60 else now + 600
+    store.update(task_id, status="processing", last_poll_at=now, error="")
+    store.set_queue_note(task_id, "服务重启后接着等 dola 原会话出片（不重新提交、不再扣点）")
+    print(f"[resume] {task_id}（{account}）接着等原会话 {conv}，最晚到 "
+          f"{time.strftime('%H:%M', time.localtime(until))}", flush=True)
+    try:
+        while True:
+            if time.time() > until:
+                err = "服务重启后接着等 dola 原会话，等到出片时限仍未出片（等待出片超时）"
+                store.update(task_id, status="failed", error=err, finished_at=time.time())
+                _maybe_start_recovery(task_id, TimeoutError(err))
+                return
+            res = None
+            if pool.egress_throttle_remaining(account) <= 0:   # 出口被限流时这一轮先不查
+                try:
+                    res = await asyncio.to_thread(pool.fetch_conversation_video, account, conv,
+                        **({"reference_count": len(_task_reference_thumbs(row.get("reference_thumbs"))),
+                            "duration": row.get("duration"), "ratio": row.get("ratio")}
+                           if sites.is_doubao_model(row.get("model")) else {}))
+                except Exception as exc:  # noqa: BLE001 - 单次查询失败下一轮再试
+                    print(f"[resume] {task_id} 查询失败（稍后再试）: {str(exc)[:160]}", flush=True)
+            store.update(task_id, last_poll_at=time.time())   # 心跳：别让看门狗当成卡住
+            if res and res.get("local_path"):
+                meta = await asyncio.to_thread(_video_metadata, res["local_path"], duration,
+                                               row.get("ratio"))
+                try:
+                    pool.claim_recovered(account, row.get("model") or "", duration, res)
+                except Exception as exc:  # noqa: BLE001 - 记账失败不影响交付
+                    print(f"[resume] {task_id} 记账失败: {exc}", flush=True)
+                got = float(meta.get("video_duration") or 0)
+                if not res.get("validation_error") and duration > 15 and got and got < duration * 0.9:
+                    # 30 秒单原会话只出了半截：照实失败（不再补段，免得重启又多扣点）
+                    store.update(task_id, status="failed", queue_note="", finished_at=time.time(),
+                                 error=f"服务重启后取回的原会话成片只有 {got:.1f} 秒，不足 {duration} 秒")
+                    return
+                public_url = f"{config.PUBLIC_BASE}/videos/{Path(res['local_path']).name}"
+                store.update(task_id, status="failed" if res.get("validation_error") else "completed",
+                             video_url=public_url, error=res.get("validation_error") or "",
+                             queue_note="", last_poll_at=time.time(), finished_at=time.time(), **meta)
+                outcome = "成片不符合请求，已保留原片" if res.get("validation_error") else "原会话出片"
+                print(f"[resume] {task_id} {outcome} → {public_url}", flush=True)
+                await asyncio.to_thread(_prune_downloads)
+                return
+            if res and res.get("final"):
+                if res.get("plan_unavailable"):
+                    pool._mark_abnormal(account, res.get("detail") or "豆包套餐不支持创作")
+                upstream = "豆包" if sites.is_doubao_model(row.get("model")) else "dola"
+                store.update(task_id, status="failed", queue_note="", finished_at=time.time(),
+                             error=failure_text.summarize(
+                                 f"{upstream} 最终状态 {res.get('status')}：{(res.get('detail') or '')[:200]}"))
+                return
+            await asyncio.sleep(max(1, config.RESUME_POLL_SECONDS))
+    finally:
+        RESUMING.discard(task_id)
+
+
+async def _resume_task(row: dict):
+    task_id = row["id"]
+    account = row.get("account")
+    pair = _pair_state(row)
+    if pair.get("first") and not pair.get("pending") and not pair.get("active"):
+        await _run_task(task_id, row["model"], row["prompt"],
+                        None if row.get("ratio") == "default" else row.get("ratio"), row.get("duration"),
+                        _task_reference_images(row.get("reference_images")), _task_client(row))
+        return
+    if account and row.get("conversation_id") and _is_work_task(row):
+        store.update(task_id, status="failed", error="服务中断后正在取回工作模式原会话", finished_at=time.time())
+        _maybe_start_recovery(task_id, TimeoutError("工作模式等待超时"))
+        return
+    if row.get('execution_mode') == 'force15' and not row.get('conversation_id'):
+        await _run_task(task_id,row['model'],row['prompt'],None if row.get('ratio')=='default' else row.get('ratio'),
+                        row.get('duration'),_task_reference_images(row.get('reference_images')),_task_client(row))
+        return
+    # cookie 号（纯 API）重启后不该去调浏览器 resume —— 本机没有可用 Chromium，
+    # 只会报 `Connection closed while reading from the driver` 把任务判死。
+    # 已经提交过上游（有会话）的接着等原会话；还没提交的才按原参数重新受理
+    # （参考图落盘文件已保留，不会丢）。
+    if account and pool.is_pure_account(account) and row.get("conversation_id"):
+        await _resume_pure_conversation(row)
+        return
+    if account and pool.is_pure_account(account):
+        ratio = None if row.get("ratio") == "default" else row.get("ratio")
+        print(f"[resume] {task_id}（{account}）走纯 API 重新受理", flush=True)
+        await _run_task(
+            task_id, row["model"], row["prompt"], ratio, row.get("duration"),
+            _task_reference_images(row.get("reference_images")), _task_client(row),
+        )
+        return
+    deadline = row.get("deadline_at") or (
+        time.time() + (1800 if row.get("duration") == 30 else config.VIDEO_TIMEOUT)
+    )
+    remaining = max(1, int(deadline - time.time()))
+    api_key_hash = row.get("api_key_hash")
+    acquired = False
+    try:
+        await key_limiter.acquire(
+            api_key_hash, int(row.get("client_concurrency_limit") or 0)
+        )
+        acquired = True
+        store.update(task_id, status="processing", last_poll_at=time.time(),
+                     started_at=row.get("started_at") or time.time())
+
+        def on_poll(now, note=None, wait_seconds=None, progress=None):
+            fields = {"last_poll_at": now}
+            if progress:
+                store.set_queue_note(task_id, progress)
+            if note:
+                fields["upstream_note"] = note        # dola 回执原话（含「预计等待 N 分钟」）
+            if wait_seconds:
+                fields["upstream_wait"] = int(wait_seconds)
+            store.update(task_id, **fields)
+
+        result = await pool.resume_video(
+            row["account"], row["conversation_id"], remaining, on_poll=on_poll,
+            duration=row.get("duration"),
+            ratio=None if row.get("ratio") == "default" else row.get("ratio"),
+            cost=_duration_cost(row.get("model"), row.get("duration") or 10))
+        fields = await _completion_fields(task_id, result, row.get("duration"), row.get("ratio"))
+        store.update(task_id, status="completed",
+                     account=result.get("account"), last_poll_at=time.time(),
+                     finished_at=time.time(), **fields)
+    except Exception as e:
+        store.update(task_id, status="failed", error=failure_text.summarize(str(e)),
+                     finished_at=time.time())
+    finally:
+        if acquired:
+            await key_limiter.release(api_key_hash)
+
+
+def _task_client(row: dict) -> dict:
+    """从任务快照恢复调度所需的客户上下文，不依赖 Key 当前是否仍存在。"""
+    return {
+        "api_key_hash": row.get("api_key_hash"),
+        "api_key_name": row.get("api_key_name") or "历史任务",
+        "daily_limit": 0,
+        "concurrency_limit": int(row.get("client_concurrency_limit") or 0),
+        "allowed_durations": list(SUPPORTED_DURATIONS),
+    }
+
+
+def _task_reference_thumbs(raw) -> list[str]:
+    """任务行里的缩略图文件名列表（坏数据当空）。"""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    return [str(x) for x in data if x] if isinstance(data, list) else []
+
+
+def _task_reference_images(raw) -> list[str]:
+    try:
+        values = json.loads(raw or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return values if isinstance(values, list) else []
+
+
+_THREAD_POOL: ThreadPoolExecutor | None = None
+
+
+def open_thread_pool() -> int:
+    """把 asyncio 的默认线程池开大：出片/探测都跑在 to_thread 里。
+
+    Python 默认只有 min(32, CPU+4) 个线程 —— 不限并发时它才是真正的瓶颈
+    （第 33 个任务只能排队等）。0 = 自动，取 max(64, CPU×8)。
+    """
+    global _THREAD_POOL
+    limit = int(getattr(config, "THREAD_POOL_MAX", 0) or 0)
+    workers = limit if limit > 0 else max(64, (os.cpu_count() or 4) * 8)
+    _THREAD_POOL = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dola")
+    asyncio.get_running_loop().set_default_executor(_THREAD_POOL)
+    print(f"[startup] 线程池 {workers} 路（DOLA_THREAD_POOL_MAX={limit}，0=自动）", flush=True)
+    return workers
+
+
+@app.on_event("startup")
+async def resume_incomplete_tasks():
+    """服务重启后恢复已受理会话，并重新排队尚未开始的 queued 任务。"""
+    open_thread_pool()
+    _load_responder()
+    work_reply.apply_saved(store.get_setting(WORK_15S_KEY), store.get_setting(WORK_15S_CONCURRENCY_KEY))
+    # 15 秒额度锁在号池库里；按任务记录补齐，升级前用过的号不必各撞一次上限
+    work_since = time.time() - work_reply.WORK_QUOTA_SECONDS
+    restored = pool.restore_work_quota(store.work_videos_since(work_since))
+    # 失败记录里 Dola 写明了恢复时间的（在别处用掉额度的号），以及同邮箱的重复账号，一并补上
+    restored += pool.restore_work_limits(store.work_failures_since(work_since))
+    restored += pool.share_work_locks()
+    pool.restore_work_suspects(store.work_failures_since(work_since))
+    if restored:
+        print(f"[startup] 按任务记录恢复 15 秒额度锁：{'、'.join(dict.fromkeys(restored))}", flush=True)
+    # 先处理崩溃时留下的 processing 孤儿任务（有 conversation 保留续轮询，
+    # 无 conversation 清空账号重新派号），避免永久卡死。
+    stale_refs = sweep_stale_references()
+    if stale_refs:
+        print(f"[startup] 清理 {stale_refs} 个残留参考图文件", flush=True)
+    # 启动也跑一次保留期清理（进程长期不重启时靠每日循环兜着）
+    try:
+        await asyncio.to_thread(_maintenance)
+    except Exception as exc:
+        print(f"[startup] 维护任务失败: {exc}", flush=True)
+    recovered = store.recover_runtime_jobs()
+    if recovered:
+        print(f"[startup] 恢复 {len(recovered)} 个运行中任务并重新排队", flush=True)
+    for row in store.recoverable_tasks():
+        asyncio.create_task(_resume_task(row))
+    requeued = store.recoverable_queued_tasks()
+    if requeued:
+        print(f"[startup] 重新受理 {len(requeued)} 个没有账号的任务"
+              "（含被重启取消、只剩会话的）", flush=True)
+    for row in requeued:
+        ratio = row.get("ratio")
+        if ratio == "default":
+            ratio = None
+        asyncio.create_task(_run_task(
+            row["id"], row["model"], row["prompt"], ratio, row["duration"],
+            _task_reference_images(row.get("reference_images")), _task_client(row),
+        ))
+    watching = store.recovering_tasks()
+    if watching:
+        print(f"[startup] 接上 {len(watching)} 个超时任务的后台自动取回", flush=True)
+    for row in watching:
+        asyncio.create_task(_recover_loop(row["id"]))
+    asyncio.create_task(_auto_upscale_loop())
+    upscaling = store.upscale_unfinished()
+    if upscaling:
+        print(f"[startup] 接着查 {len(upscaling)} 个超分任务", flush=True)
+    for row in upscaling:
+        asyncio.create_task(_run_upscale(row["id"]))
+    asyncio.create_task(_update_loop())
+    asyncio.create_task(_update_check_loop())
+    asyncio.create_task(_cred_refresher_loop())
+    asyncio.create_task(_daily_quota_reset_loop())
+    asyncio.create_task(_task_watchdog_loop())
+
+
+WATCHDOG_DISPATCHED: set[str] = set()
+WATCHDOG_RETRIES: dict[str, int] = {}
+
+
+async def _task_watchdog_loop() -> None:
+    """看门狗：把「挂着不动」和「排队等太久」的任务收掉，别让客户端一直等。
+
+    背景：服务重启会把 asyncio 里正在跑的 `_run_task` 取消掉（CancelledError 不会被
+    `except Exception` 捕获），数据库里那些行就留在 processing，客户端看起来像挂起。
+    这里定期巡检：
+    - processing 且超过 STALE_TASK_SECONDS 没有任何轮询更新 → 重新派发（最多 3 次）
+    - 还没提交上游（没有 conversation）却等了超过 MAX_QUEUE_WAIT_SECONDS → 明确失败
+    """
+    while True:
+        await asyncio.sleep(max(15, config.WATCHDOG_INTERVAL_SECONDS))
+        try:
+            actions = await asyncio.to_thread(_watchdog_plan)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[watchdog] 巡检失败: {exc}", flush=True)
+            continue
+        for action in actions:
+            row = action["row"]
+            if action["kind"] == "resume":
+                asyncio.create_task(_resume_task(row))
+            else:
+                asyncio.create_task(_run_task(
+                    row["id"], row["model"], row["prompt"],
+                    None if row.get("ratio") == "default" else row.get("ratio"),
+                    row.get("duration"),
+                    _task_reference_images(row.get("reference_images")),
+                    _task_client(row),
+                ))
+
+
+def _watchdog_plan() -> list[dict]:
+    """只做数据库判定，返回需要上层重新派发的动作（线程里跑，不碰事件循环）。"""
+    info = store.stale_pending_tasks(
+        stale_seconds=config.STALE_TASK_SECONDS,
+        wait_cap_seconds=config.MAX_QUEUE_WAIT_SECONDS,
+    )
+    failed_ids: set[str] = set()
+    for row in info["waiting"]:
+        task_id = row["id"]
+        since = row.get("queued_since") or row["created_at"] or time.time()
+        minutes = (time.time() - float(since)) / 60
+        print(f"[watchdog] {task_id} 排队 {minutes:.0f} 分钟仍没轮到（上游持续限流），判失败",
+              flush=True)
+        store.update(task_id, status="failed", finished_at=time.time(),
+                     error=f"排队等待超过 {config.MAX_QUEUE_WAIT_SECONDS // 60} 分钟仍未拿到可用账号"
+                           "（上游限流），请稍后重试")
+        failed_ids.add(task_id)
+        WATCHDOG_DISPATCHED.discard(task_id)
+        WATCHDOG_RETRIES.pop(task_id, None)
+
+    actions: list[dict] = []
+    for row in info["stuck"] + info["orphans"]:
+        task_id = row["id"]
+        if task_id in failed_ids:
+            continue
+        if task_id in WATCHDOG_DISPATCHED:
+            continue
+        tries = WATCHDOG_RETRIES.get(task_id, 0) + 1
+        WATCHDOG_RETRIES[task_id] = tries
+        if tries > 3:
+            print(f"[watchdog] {task_id} 已重派 {tries - 1} 次仍无进展，判失败", flush=True)
+            store.update(task_id, status="failed", finished_at=time.time(),
+                         error="任务多次中断（服务重启/上游限流），请重新提交")
+            WATCHDOG_RETRIES.pop(task_id, None)
+            continue
+        full = store.get(task_id)
+        if not full:
+            continue
+        WATCHDOG_DISPATCHED.add(task_id)
+        print(f"[watchdog] {task_id} 卡住无进展（第 {tries} 次重派）", flush=True)
+        kind = "resume" if (full.get("conversation_id") and full.get("account")) else "submit"
+        actions.append({"kind": kind, "row": full})
+    # 派发记录只保留仍在排队的任务，避免集合无限增长
+    pending_ids = {row["id"] for row in info["stuck"] + info["orphans"] + info["waiting"]}
+    WATCHDOG_DISPATCHED.intersection_update(pending_ids)
+    return actions
+
+
+async def _daily_quota_reset_loop() -> None:
+    """每天 LIMIT_RESET_HOUR 点（默认日本时间 00:00）自动恢复全池额度。"""
+    first = True
+    while True:
+        delay = max(30.0, pool.next_quota_reset_at() - time.time())
+        if first:
+            first = False
+            print(
+                f"[reset] 每日额度重置已排程：{config.LIMIT_RESET_TZ} "
+                f"每天 {config.LIMIT_RESET_HOUR}:00，下次 {delay / 3600:.1f} 小时后",
+                flush=True,
+            )
+        await asyncio.sleep(delay)
+        try:
+            count = pool.reset_daily_quotas()
+            print(
+                f"[reset] 每日额度重置完成（{config.LIMIT_RESET_TZ} "
+                f"{config.LIMIT_RESET_HOUR}:00），恢复 {count} 个账号",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[reset] 每日额度重置失败: {exc}", flush=True)
+        try:
+            await asyncio.to_thread(_maintenance)
+        except Exception as exc:
+            print(f"[maint] 维护任务失败: {exc}", flush=True)
+
+
+def _prune_downloads() -> dict:
+    """出片目录超过体积上限就按 mtime 从旧到新删，避免把磁盘撑满。"""
+    limit = config.DOWNLOAD_MAX_BYTES
+    root = Path(config.DOWNLOAD_DIR)
+    if limit <= 0 or not root.is_dir():
+        return {}
+    items = []
+    for path in root.iterdir():
+        try:
+            if path.is_file():
+                items.append((path.stat().st_mtime, path.stat().st_size, path))
+        except OSError:
+            continue
+    total = sum(size for _, size, _ in items)
+    if total <= limit:
+        return {}
+    removed = 0
+    for _, size, path in sorted(items):
+        if total <= limit:
+            break
+        try:
+            path.unlink()
+            total -= size
+            removed += 1
+        except OSError:
+            continue
+    return {"removed": removed, "total": total} if removed else {}
+
+
+def _maintenance() -> None:
+    """保留期清理：删过期任务记录 + 对应视频文件，再 VACUUM 还盘。
+
+    目的：tasks.db 和 downloads/ 都不能无限增长 —— 2026-09-22 就是库被撑到 587MB
+    把面板接口顶成 MemoryError 的。
+    """
+    removed = store.prune_finished(config.TASK_RETENTION_DAYS)
+    files = 0
+    for row in removed:
+        delete_reference_thumbnails(_task_reference_thumbs(row.get("reference_thumbs")))
+        urls = [row.get("video_url")] + [item["video_url"] for item in _task_videos(row)]
+        for url in set(filter(None, urls)):
+            target = Path(config.DOWNLOAD_DIR) / Path(url).name
+            try:
+                if target.is_file():
+                    target.unlink()
+                    files += 1
+            except OSError:
+                continue
+    if removed:
+        store.vacuum()
+    stats = store.storage_stats()
+    print(
+        "[maint] 清理 %d 条过期任务（保留 %s 天）/ %d 个视频文件，"
+        "库 %.1f MB / 共 %d 条" % (len(removed), config.TASK_RETENTION_DAYS, files,
+                                   stats["db_bytes"] / 1048576, stats["tasks"]),
+        flush=True,
+    )
+    pruned = _prune_downloads()
+    if pruned:
+        print("[maint] 出片目录超过 %.0f MB，删除 %d 个旧文件"
+              % (config.DOWNLOAD_MAX_BYTES / 1048576, pruned["removed"]), flush=True)
+
+
+@app.post("/v1/videos/generations", response_model=TaskResponse)
+async def create_video(request: Request, authorization: str | None = Header(default=None)):
+    client = _auth(authorization)
+    content_type = (request.headers.get("content-type") or "").lower()
+    if content_type.startswith(("multipart/form-data", "application/x-www-form-urlencoded")):
+        # 画布（infinite-canvas 之类）走 Sora 风格 multipart，字段名和 JSON 路径不一样
+        raw = await _raw_from_multipart(request)
+    else:
+        try:
+            raw = await request.json()
+        except Exception:
+            raise HTTPException(400, "invalid json body")
+    _log_image_fields(raw, "openai")
+    try:
+        req = VideoGenRequest.model_validate(raw)
+    except Exception as exc:
+        raise HTTPException(422, str(exc)) from exc
+    # 时长来源优先级：duration → seconds → duration_seconds（new-api 的 sora 插件只发 seconds）。
+    execution_mode = req.execution_mode or default_execution_mode(req.model)
+    duration = req.duration or req.seconds or req.duration_seconds or (15 if execution_mode in ('force15', 'chat', 'work') else 10)
+    # 比例 / 尺寸也常被放进 metadata（如 new-api 风格 {"metadata": {"ratio": "16:9"}}）
+    size = req.size or _nested_value(raw, ("size",))
+    ratio = _resolve_ratio(size, req.ratio or _nested_value(raw, ("ratio", "aspect_ratio")))
+    refs = _normalize_image_refs(
+        req.reference_images, req.image_url, req.image,
+        req.input_image, req.input_images,
+    )
+    refs = list(dict.fromkeys(refs + _deep_image_urls(raw)))
+    if refs:
+        print(f"[api] 收到参考图 {len(refs)} 张", flush=True)
+    resolution, prompt, source = _request_resolution(raw, req.prompt)
+    _log_request_fields(raw, "openai", resolution, source)
+    return await _submit_task(client, req.model, prompt, ratio, duration, refs,
+                              reference_source=req.reference_source,
+                              resolution=resolution, size=size, execution_mode=execution_mode, video_count=req.video_count, reference_audio_urls=reference_audio.audio_urls(raw))
+
+
+def _data_url_from_upload(filename: str, data: bytes) -> str:
+    """画布上传的参考图折成 data: URL —— 下游 validate_reference_urls 本来就支持这种格式。"""
+    suffix = Path(filename or "").suffix.lower().lstrip(".")
+    mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(suffix, "png")
+    return "data:image/%s;base64,%s" % (mime, base64.b64encode(data).decode())
+
+
+async def _raw_from_multipart(request: Request) -> dict[str, Any]:
+    form = await request.form()
+    raw = {}
+    for key in ('model','prompt','execution_mode','size','ratio','aspect_ratio','response_format','reference_source') + RESOLUTION_KEYS:
+        value=form.get(key)
+        if isinstance(value,str) and value.strip():raw[key]=value.strip()
+    for key in ('duration','seconds','duration_seconds','video_count','n'):
+        value=form.get(key)
+        if isinstance(value,str) and value.strip():
+            try:raw[key]=int(value)
+            except ValueError:raise HTTPException(422,key+' 必须为整数')
+    for keys,target,limit in [
+        (('image[]','image','input_image','first_frame','last_frame','reference_images'),'reference_images',config.REFERENCE_IMAGE_MAX_BYTES),
+        (('audio[]','audio','input_audio','reference_audio','reference_audios'),'reference_audio',reference_audio.MAX_BYTES)]:
+        refs=[]
+        for key in keys:
+            for item in form.getlist(key):
+                if hasattr(item,'read'):
+                    data=await item.read(limit+1)
+                    if len(data)>limit:raise HTTPException(422,'参考文件大小超过限制')
+                    if not data:raise HTTPException(422,'参考文件为空')
+                    if target=='reference_audio':
+                        import mimetypes
+                        mime=mimetypes.guess_type(item.filename or '')[0] or item.content_type or ''
+                        if mime=='audio/x-wav':mime='audio/wav'
+                        if mime not in reference_audio.MIMES:raise HTTPException(422,'参考音频格式不支持')
+                        refs.append('data:'+mime+';base64,'+base64.b64encode(data).decode())
+                    else:refs.append(_data_url_from_upload(item.filename or '',data))
+                elif isinstance(item,str) and item.strip():refs.append(item.strip())
+        if refs:raw[target]=refs
+    if any(form.getlist(k) for k in ('video[]','video','input_video')):
+        raise HTTPException(422,'当前支持参考图片和音频，尚不支持参考视频')
+    return raw
+
+
+@app.post("/v1/videos", response_model=TaskResponse, status_code=202)
+async def create_video_vinted_alias(request: Request,
+                                    authorization: str | None = Header(default=None)):
+    """Vinted/New API 兼容入口：与 OpenAI 路径同逻辑，但返回 202 Accepted。"""
+    return await create_video(request, authorization)
+
+
+LONG_VIDEO_REJECT_MESSAGE = (
+    "dola 自 2026-10-12 起单条视频最长 15 秒，{d} 秒无法直接生成。请改用 5/10/15 秒；"
+    "如需 30 秒，请让管理员开启 DOLA_30S_MODE=pair（两段 15 秒拼接，消耗双倍额度）")
+
+
+def _reject_unsupported_long(duration, model: str = "") -> None:
+    """DOLA_30S_MODE=reject（默认）：30 秒及以上受理时就拒，不派号、不占额度。
+
+    2.0 的 30 秒在开着工作模式时用两段 15 秒拼，不受这个设置影响。
+    """
+    try:
+        seconds = int(duration or 0)
+    except (TypeError, ValueError):
+        return
+    if work_reply.uses_work_pair(model, seconds):
+        return
+    if seconds > 15 and config.LONG_VIDEO_MODE == "reject":
+        raise HTTPException(422, LONG_VIDEO_REJECT_MESSAGE.format(d=seconds))
+
+
+def _reject_unaffordable(model: str, duration) -> None:
+    """上游报价超过一个号一整天的额度：号池里没有任何号付得起，受理时直接拒（2.1.9）。
+
+    工作模式（2.0 的 15 秒、两段 15 秒拼的 30 秒）用每号 7 天 1 条的单独额度，不扣每日点数，
+    不按这里的报价拦（2.0 的 30 秒按报价是 8 点，曾被误拒）。
+    """
+    try:
+        seconds = int(duration or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if work_reply.uses_work_mode(model, seconds) or work_reply.uses_work_pair(model, seconds):
+        return
+    from browser_pool import duration_cost
+    cost = duration_cost(model, duration)
+    if cost > config.DAILY_LIMIT:
+        raise HTTPException(
+            422,
+            f"{model} 生成 {duration} 秒视频，dola 要扣 {cost} 个额度，超过每个号每日上限 "
+            f"{config.DAILY_LIMIT} 个，号池无法生成；请改用更短时长"
+            + ("或 seedance-2.0-fast" if "2.5" in model else ""))
+
+
+def _check_doubao_model(model, duration) -> str:
+    """豆包模型：只认 sites.DOUBAO_MODELS 里的精确名字，时长 4~15（2.5 到 30）任意整数。"""
+    spec = sites.doubao_spec(model)
+    try:
+        seconds = int(duration)
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"时长无效：{duration!r}")
+    low, high = sites.DOUBAO_MIN_DURATION, spec[1]
+    if not (low <= seconds <= high):
+        raise HTTPException(422, f"{sites.canonical_doubao_model(model)} 支持 {low}~{high} 秒（收到 {seconds} 秒）")
+    return sites.canonical_doubao_model(model)
+
+
+def _check_prompt_encoding(prompt):
+    """拦截客户端编码损坏后的问号串，保留正常问句、中文和英文提示词。"""
+    text = str(prompt or "").strip()
+    damaged = text.count('?') + text.count('？') + text.count('\ufffd')
+    if damaged >= 6 and damaged > len(text) * .6 and sum(c.isalnum() for c in text) <= 8:
+        raise HTTPException(422, "提示词疑似编码损坏（大部分字符已变成问号）；请使用 UTF-8 JSON 文件或 UTF-8 字节提交，检查脚本读取文件和请求正文的编码")
+
+
+def default_execution_mode(model):
+    return 'force15' if _model_version(model) == 'seedance-2.0' and not sites.is_doubao_model(model) else 'auto'
+
+
+async def _submit_task(client, model, prompt, ratio, duration, reference_images,
+                       reference_source=None, resolution=None, size=None, execution_mode=None, video_count=1, reference_audio_urls=None):
+    """公共受理逻辑：校验模型/时长/账号池 -> 入队 -> 后台跑，返回 TaskResponse。"""
+    _check_prompt_encoding(prompt)
+    execution_mode = work_reply.normalize_execution_mode(model, duration, execution_mode or default_execution_mode(model))
+    if execution_mode == 'force15':
+        error=force15_request_error(model,duration,video_count)
+        if error:raise HTTPException(422,error)
+    if reference_audio_urls and execution_mode != 'force15':
+        raise HTTPException(422,'参考音频请使用强开15s模式；未丢弃音频或提交生成')
+    count_error = work_reply.work_count_error(model, duration, execution_mode, video_count)
+    if count_error:
+        raise HTTPException(422, count_error)
+    if execution_mode not in ("chat", "work", "force15", "auto"):
+        raise HTTPException(422, "execution_mode 只支持 chat / work（兼容 force15 / auto）")
+    if execution_mode == "work":
+        error = work_reply.work_request_error(model, duration)
+        if error:
+            raise HTTPException(422, error)
+    if reference_source is None:
+        reference_source = config.DEFAULT_REFERENCE_SOURCE if reference_images else "unspecified"
+    try:
+        supplement = reference_supplement(reference_source, bool(reference_images))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if len(dispatch_prompt(prompt or "", supplement, ratio)) > config.MAX_PROMPT_CHARS:
+        raise HTTPException(422, f"提交提示词（含素材来源说明）超过 {config.MAX_PROMPT_CHARS} 字符上限")
+    if sites.is_doubao_model(model):
+        resolved = _check_doubao_model(model, duration)
+    elif execution_mode in ("force15", "work"):
+        resolved = _model_version(model)
+    else:
+        _reject_unsupported_long(duration, model)
+        resolved = _resolve_model_for_duration(model, duration)
+        if resolved is not None:
+            _reject_unaffordable(resolved, duration)
+    if resolved is None:
+        version = _model_version(model)
+        if version is not None:
+            supported = _supported_durations_for(version)
+            raise HTTPException(
+                422,
+                f"{_public_model(version)} 仅支持 {'/'.join(map(str, supported))} 秒视频"
+                f"（收到 {duration} 秒）",
+            )
+        raise HTTPException(
+            422,
+            "不支持的模型/时长组合："
+            f"模型={model!r}，时长={duration}秒"
+            f"（seedance-2.5 支持 {_supported_durations_for('seedance-2.5')} 秒，"
+            f"seedance-2.0-fast 仅支持 {list(config.V20_DURATIONS)} 秒）",
+        )
+    model = _public_model(resolved)
+    # Key 的时长白名单只管 dola 的档位；豆包的任意秒数只受上面的模型范围约束
+    if duration not in client["allowed_durations"] and not (
+            sites.is_doubao_model(model) and duration not in SUPPORTED_DURATIONS):
+        raise HTTPException(422, f"当前 API Key 不允许生成 {duration} 秒视频")
+    try:
+        reference_images = await validate_reference_urls(reference_images)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    # 账号暂时忙时允许任务进入 queued，由 BrowserPool 的全局并发控制实际排队。
+    # 只有明确全部达到每日上限/积分不足时才立即拒绝。
+    weekly = work_reply.uses_work_mode(model, duration, execution_mode) and not sites.is_doubao_model(model)
+    if not weekly and not pool.available and pool.all_accounts_limited:
+        raise HTTPException(429, "账号限流：所有已开启调度的账号均已达到 Dola 每日视频上限，请明天再试")
+    if not weekly and not pool.available and pool.all_accounts_quota_blocked:
+        raise HTTPException(429, "积分不足：所有已开启调度的账号都没有足够积分，请等待额度刷新")
+    if not pool.accounts:
+        raise HTTPException(503, "no account in pool")
+    # data: URL（客户端内联的参考图）先落盘：几 MB 的 base64 绝不能进 tasks.db，
+    # 否则任务列表接口要序列化几百 MB，直接把进程顶成 MemoryError / 卡死。
+    try:
+        original_images = reference_images
+        reference_images = await asyncio.to_thread(materialize_data_urls, reference_images)
+        try:
+            audio_urls = await reference_audio.validate(reference_audio_urls or [])
+            audio_urls = await asyncio.to_thread(reference_audio.materialize, audio_urls)
+        except BaseException:
+            cleanup_local_references([p for p in reference_images if p not in original_images])
+            raise
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    task_id = "video_" + uuid.uuid4().hex
+    if len(prompt or "") > config.MAX_PROMPT_CHARS:
+        raise HTTPException(
+            422, f"提示词过长（上限 {config.MAX_PROMPT_CHARS} 字符，收到 {len(prompt)}）")
+    try:
+        store.create(
+            task_id,
+            model,
+            prompt,
+            ratio or "default",
+            duration,
+            reference_images=json.dumps(reference_images, ensure_ascii=False),
+            reference_audio=json.dumps(audio_urls, ensure_ascii=False),
+            api_key_hash=client["api_key_hash"],
+            api_key_name=client["api_key_name"],
+            daily_limit=client["daily_limit"],
+            concurrency_limit=client["concurrency_limit"],
+            max_pending=config.MAX_PENDING_TASKS,
+            reference_source=reference_source,
+            prompt_supplement=supplement,
+            execution_mode=execution_mode,
+            video_count=video_count,
+        )
+    except TaskQuotaExceeded as exc:
+        cleanup_local_references(reference_images + audio_urls)
+        raise HTTPException(429, str(exc)) from exc
+    except PendingTaskLimitExceeded as exc:
+        cleanup_local_references(reference_images + audio_urls)
+        raise HTTPException(429, str(exc)) from exc
+    plan = upscale.auto_plan(upscale.load_settings(store), resolution, size)
+    if plan["requested"]:
+        fields = {"requested_resolution": plan["requested"]}
+        if plan["auto"]:
+            fields.update(upscale_auto=1, upscale_target=plan["target"], upscale_provider=plan["provider"])
+        elif plan["note"]:
+            fields.update(upscale_status="skipped", upscale_error=plan["note"])
+        store.update(task_id, **fields)
+    asyncio.create_task(_run_task(
+        task_id, model, prompt, ratio, duration, reference_images, client
+    ))
+    return TaskResponse(
+        id=task_id, status="queued", model=model, prompt=prompt,
+        progress=_progress_payload(status="queued", created_at=time.time(),
+                                   duration=duration),
+        resolution=plan["requested"], upscale_note=_upscale_note(plan),
+    )
+
+
+def _upscale_note(plan_or_row: dict) -> str | None:
+    """给客户看的一句自动超分说明（任务创建时按计划，查询时按库里的状态）。"""
+    requested = plan_or_row.get("requested") or plan_or_row.get("requested_resolution")
+    if not requested or requested == "720p":
+        return None
+    if "auto" in plan_or_row:                      # 创建时的计划
+        return (f"出片后自动超分到 {requested}" if plan_or_row["auto"] else plan_or_row.get("note") or None)
+    state = plan_or_row.get("upscale_status")
+    if not plan_or_row.get("upscale_auto"):
+        return plan_or_row.get("upscale_error") or None
+    return {"completed": f"已超分到 {plan_or_row.get('upscale_target') or requested}",
+            "failed": f"超分失败，交付原片：{plan_or_row.get('upscale_error') or ''}".rstrip("：")}.get(
+        state, f"出片后自动超分到 {requested}")
+
+
+async def _relay_video_link(row: dict, link: str, request: Request):
+    try:
+        proxy = http_proxy(row.get("account") or "")
+    except Exception as exc:
+        raise HTTPException(502, "账号代理不可用，视频中转已停止") from exc
+    timeout = aiohttp.ClientTimeout(total=None, connect=20, sock_read=90)
+    session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
+    headers = {name: request.headers[name] for name in ("Range", "If-Range") if name in request.headers}
+    try:
+        upstream = await session.request(
+            request.method, link, headers=headers, proxy=proxy, allow_redirects=True)
+    except asyncio.CancelledError:
+        await session.close()
+        raise
+    except Exception as exc:
+        await session.close()
+        raise HTTPException(502, "视频源连接失败，已通过账号代理中止中转") from exc
+    if upstream.status not in (200, 206, 416):
+        upstream.release()
+        await session.close()
+        raise HTTPException(502, f"视频源返回 HTTP {upstream.status}")
+    response_headers = {
+        name: upstream.headers[name]
+        for name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified")
+        if name in upstream.headers
+    }
+    response_headers["Cache-Control"] = "private, no-store"
+    if request.method == "HEAD":
+        upstream.release()
+        await session.close()
+        return Response(status_code=upstream.status, headers=response_headers)
+
+    async def stream():
+        try:
+            async for chunk in upstream.content.iter_chunked(256 * 1024):
+                yield chunk
+        finally:
+            upstream.release()
+            await session.close()
+
+    return StreamingResponse(stream(), status_code=upstream.status, headers=response_headers)
+
+
+# HEAD 也要接：不少客户端 / 播放器先 HEAD 探链接，只注册 GET 时 HEAD 会落到静态目录变成 404
+@app.api_route("/v/{name}", methods=["GET", "HEAD"])
+async def video_short_link(name: str, request: Request, relay: bool = False):
+    """Serve a fresh CDN redirect, or relay media through the account proxy when requested.
+
+    Public like /videos/<file>: the unguessable task id is the capability.
+    `<task>-1080p.mp4`（或 -2k / -4k）是超分结果。
+    """
+    task_id = name[:-4] if name.endswith(".mp4") else name
+    hd = _UPSCALE_NAME.match(task_id)
+    if hd:
+        return _upscaled_video(hd["id"], hd["target"])
+    row = store.get(task_id)
+    if not row or row.get("status") != "completed" or not row.get("video_link"):
+        raise HTTPException(404, "video not found")
+    link = await video_link.current_link(row, store)
+    if not link:
+        raise HTTPException(502, "upstream video link unavailable")
+    if relay:
+        return await _relay_video_link(row, link, request)
+    return RedirectResponse(link, status_code=302, headers={"Cache-Control": "private, max-age=60"})
+
+
+# ---------------------------------------------------------------- 面板一键更新（updater.py）
+
+def _update_busy() -> dict:
+    running = store.queue_progress(created_at=None, duration=None)["running"]
+    jobs = (len(_running_add_jobs()) + ADD_ACCOUNT_SEM.active
+            + sum(1 for job in TEST_JOBS.values() if job.get("status") == "running"))
+    return {"running": running, "jobs": jobs}
+
+
+async def _update_check_loop() -> None:
+    """定时查一次 GitHub 最新正式版（间隔 UPDATE_CHECK_TTL），面板的「有新版本」提醒不用等人去点「检查更新」。"""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            latest = await updater.latest_release(force=True)
+            if latest.get("version") and updater.is_newer(latest["version"], APP_VERSION):
+                print(f"[update] 发现新版本 v{latest['version']}（当前 {APP_VERSION}）", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[update] 检查新版本失败: {exc}", flush=True)
+        await asyncio.sleep(config.UPDATE_CHECK_TTL)
+
+
+async def _update_loop() -> None:
+    """有更新请求时：等生成中的任务和后台作业清空后放行更新程序；等太久就放弃。每秒查一次，空闲后尽快开始。"""
+    while True:
+        await asyncio.sleep(1)
+        try:
+            if updater.current_request():
+                await asyncio.to_thread(updater.tick, await asyncio.to_thread(_update_busy))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[update] 巡检失败: {exc}", flush=True)
+
+
+def _require_owner(x_admin_key: str | None) -> str:
+    _admin_auth(x_admin_key)
+    session = ADMIN_SESSIONS.get(x_admin_key or "") or {}
+    if session.get("role") != "owner":
+        raise HTTPException(403, "只有 owner 账号可以更新版本")
+    return session.get("username") or "owner"
+
+
+async def _update_payload(force: bool = False) -> dict:
+    latest = await updater.latest_release(force=force)
+    return {"current": APP_VERSION, "latest": latest,
+            "available": bool(latest.get("version")) and updater.is_newer(latest["version"], APP_VERSION),
+            **updater.status()}
+
+
+class UpdateRequest(BaseModel):
+    version: str
+
+
+@app.get("/api/admin/update")
+async def admin_update_status(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return await _update_payload()
+
+
+@app.post("/api/admin/update/check")
+async def admin_update_check(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return await _update_payload(force=True)
+
+
+@app.post("/api/admin/update")
+async def admin_update_start(body: UpdateRequest, x_admin_key: str | None = Header(default=None)):
+    """排空后由外部更新程序换版本、重启、验证，失败自动回滚。只能更新到 GitHub 最新正式版。"""
+    user = _require_owner(x_admin_key)
+    latest = await updater.latest_release(force=True)
+    if latest.get("error") and not latest.get("version"):
+        raise HTTPException(502, f"查不到最新版本：{latest['error']}")
+    try:
+        updater.request_update(body.version.strip().lstrip("vV"), APP_VERSION, user, latest)
+    except updater.UpdateError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return await _update_payload()
+
+
+@app.post("/api/admin/update/cancel")
+async def admin_update_cancel(x_admin_key: str | None = Header(default=None)):
+    _require_owner(x_admin_key)
+    try:
+        updater.cancel_update()
+    except updater.UpdateError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return await _update_payload()
+
+
+# ---------------------------------------------------------------- 视频超分（upscale.py）
+
+_UPSCALE_NAME = re.compile(r"^(?P<id>[A-Za-z0-9_]+)-(?P<target>1080p|2k|4k)$")
+_LOCAL_BASE = re.compile(r"//(127\.0\.0\.1|localhost|0\.0\.0\.0)[:/]")
+UPSCALE_SEM = asyncio.Semaphore(max(1, config.UPSCALE_CONCURRENCY))
+UPSCALING: set[str] = set()
+
+
+def _upscale_public_url(row: dict) -> str | None:
+    if row.get("upscale_status") != "completed":
+        return None
+    return upscale.public_url(row["id"], row.get("upscale_target"))
+
+
+def _client_video(row: dict) -> tuple[str, str | None, str | None]:
+    """客户看到的 (status, video_url, video_url_hd)。
+
+    请求了 1080p 等并自动超分的任务：库里出片后就是 completed（看门狗、重启恢复都按原逻辑走），
+    但对客户在超分完成前仍显示 processing；超分成功交高清地址，失败交原片。
+    """
+    status, url, hd = row["status"], row.get("video_url"), _upscale_public_url(row)
+    if row.get("upscale_auto") and status == "completed":
+        if not upscale.load_settings(store)["enabled"] and not row.get("upscale_job") and not hd:
+            return status, url, hd
+        state = row.get("upscale_status")
+        if state in (None, "", "queued", "processing"):
+            return "processing", None, None
+        if state == "completed" and hd:
+            return "completed", hd, hd
+    return status, url, hd
+
+
+async def _auto_upscale_loop() -> None:
+    """出片后自动超分：每 5 秒捞一次「已完成、请求了高分辨率、还没开始超分」的任务。"""
+    while True:
+        await asyncio.sleep(5)
+        try:
+            rows = await asyncio.to_thread(store.auto_upscale_pending)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[upscale] 自动超分巡检失败: {exc}", flush=True)
+            continue
+        for row in rows:
+            if not upscale.load_settings(store)["enabled"]:
+                store.update(row["id"], upscale_status="skipped", upscale_error="视频超分功能已关闭，交付原片", upscale_finished_at=time.time())
+                continue
+            store.update(row["id"], upscale_status="queued", upscale_error="", upscale_started_at=time.time(),
+                         upscale_provider=row.get("upscale_provider") or upscale.load_settings(store)["provider"],
+                         upscale_target=row.get("upscale_target") or row.get("requested_resolution") or "1080p")
+            asyncio.create_task(_run_upscale(row["id"]))
+
+
+def _upscaled_video(task_id: str, target: str):
+    row = store.get(task_id)
+    if (not row or row.get("upscale_status") != "completed"
+            or (row.get("upscale_target") or "1080p") != target):
+        raise HTTPException(404, "video not found")
+    if row.get("upscale_file"):
+        path = Path(config.DOWNLOAD_DIR) / Path(row["upscale_file"]).name
+        if path.is_file():
+            return FileResponse(path, media_type="video/mp4")
+    if row.get("upscale_url"):
+        return RedirectResponse(row["upscale_url"], status_code=302,
+                                headers={"Cache-Control": "private, max-age=60"})
+    raise HTTPException(410, "upscaled video removed")
+
+
+async def _upscale_source(row: dict) -> str:
+    """交给超分服务的原片地址：直链交付用现签的上游 H.264 原片，下载交付用本服务的 /videos/ 地址。"""
+    if row.get("video_link"):
+        link = await video_link.current_link(row, store)
+        if link:
+            return link
+        raise upscale.UpscaleError("上游直链已失效且无法续签，拿不到原片")
+    name = Path(row.get("video_url") or "").name
+    if name and (Path(config.DOWNLOAD_DIR) / name).is_file():
+        base = config.PUBLIC_BASE
+        if _LOCAL_BASE.search(base + "/"):
+            raise upscale.UpscaleError("DOLA_PUBLIC_BASE 是本机地址，外部超分服务取不到视频；请设置公网地址")
+        return f"{base}/videos/{name}"
+    raise upscale.UpscaleError("找不到原片（视频文件已删除）")
+
+
+async def _run_upscale(task_id: str) -> None:
+    """提交（若还没提交）→ 轮询 → 按设置下载或直链。服务重启后从存库的 job 接着查，不重复提交。"""
+    if task_id in UPSCALING:
+        return
+    UPSCALING.add(task_id)
+    try:
+        async with UPSCALE_SEM:
+            row = store.get(task_id)
+            if not row or row.get("upscale_status") not in ("queued", "processing"):
+                return
+            settings = upscale.load_settings(store)
+            job = json.loads(row.get("upscale_job") or "null")
+            if not job:
+                if not settings["enabled"]:
+                    raise upscale.UpscaleError("视频超分功能已关闭")
+                source = await _upscale_source(row)
+                job = await upscale.submit(settings, row.get("upscale_provider") or settings["provider"], source,
+                                           duration=row.get("video_duration") or row.get("duration"),
+                                           task_id=task_id, target=row.get("upscale_target"))
+                store.update(task_id, upscale_status="processing", upscale_job=json.dumps(job))
+            deadline = float(row.get("upscale_started_at") or time.time()) + config.UPSCALE_TIMEOUT
+            errors = 0
+            while True:
+                if time.time() > deadline:
+                    raise upscale.UpscaleError(f"超分超时：{config.UPSCALE_TIMEOUT}s 内没有结果")
+                try:
+                    result = await upscale.poll(upscale.load_settings(store), job)
+                    errors = 0
+                except (upscale.UpscaleError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    errors += 1
+                    if errors >= 5:
+                        raise upscale.UpscaleError(f"连续 5 次查询失败：{str(exc)[:200]}") from exc
+                    await asyncio.sleep(10)
+                    continue
+                if result["state"] == "completed":
+                    break
+                if result["state"] == "failed":
+                    raise upscale.UpscaleError(result.get("error") or "超分失败")
+                await asyncio.sleep(config.UPSCALE_POLL_SECONDS)
+            target = row.get("upscale_target") or settings.get("target") or "1080p"
+            fields = {"upscale_status": "completed", "upscale_url": result["url"], "upscale_error": "",
+                      "upscale_size": result.get("size"), "upscale_seconds": result.get("billed_seconds"),
+                      "upscale_finished_at": time.time()}
+            if settings.get("delivery") == "download":
+                name = f"{task_id}-{target}.mp4"
+                try:
+                    fields["upscale_size"] = await upscale.download(
+                        result["url"], str(Path(config.DOWNLOAD_DIR) / name))
+                    fields["upscale_file"] = name
+                except upscale.UpscaleError as exc:
+                    # 服务商已经出片计费：下载失败就改为直链，不判失败
+                    fields["upscale_error"] = f"{exc}；改为直链交付"
+            store.update(task_id, **fields)
+    except asyncio.CancelledError:
+        raise
+    except upscale.UpscaleError as exc:
+        store.update(task_id, upscale_status="failed", upscale_error=str(exc)[:500],
+                     upscale_finished_at=time.time())
+    except Exception as exc:  # noqa: BLE001 - 任何异常都要落库，面板才看得到
+        store.update(task_id, upscale_status="failed",
+                     upscale_error=f"{type(exc).__name__}: {redact_error(exc)}"[:500],
+                     upscale_finished_at=time.time())
+    finally:
+        UPSCALING.discard(task_id)
+
+
+class UpscaleSettingsPatch(BaseModel):
+    enabled: bool | None = None
+    provider: str | None = None
+    target: str | None = None
+    fal_key: str | None = None
+    fal_preset: str | None = None
+    open_endpoint: str | None = None
+    open_token: str | None = None
+    delivery: str | None = None
+    auto: str | None = None
+    custom_name: str | None = None
+    custom_submit_url: str | None = None
+    custom_headers: str | None = None
+    custom_body: str | None = None
+    custom_target_map: str | None = None
+    custom_id_path: str | None = None
+    custom_poll_url: str | None = None
+    custom_status_path: str | None = None
+    custom_success: str | None = None
+    custom_failed: str | None = None
+    custom_result_path: str | None = None
+    custom_error_path: str | None = None
+    custom_code_path: str | None = None
+    custom_code_ok: str | None = None
+
+
+class UpscaleRequest(BaseModel):
+    provider: str | None = None   # 不传 = 用设置里的默认服务商
+    force: bool = False           # 已超分过时重做（会再次计费）
+
+
+@app.get("/api/admin/settings/upscale")
+async def admin_upscale_settings(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return upscale.public_settings(upscale.load_settings(store))
+
+
+@app.patch("/api/admin/settings/upscale")
+async def admin_upscale_settings_save(body: UpscaleSettingsPatch, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        saved = upscale.save_settings(store, body.model_dump(exclude_unset=True))
+    except upscale.UpscaleError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return upscale.public_settings(saved)
+
+
+# ---------------------------------------------------------------- AI 代答（dola_responder 第二层）
+RESPONDER_KEY = "ai_responder"
+WORK_15S_KEY = "work_15s"
+WORK_15S_CONCURRENCY_KEY = "work_15s_concurrency"
+
+
+class Work15Patch(BaseModel):
+    enabled: bool
+    concurrency: int | None = Field(None, ge=1, strict=True)
+
+
+@app.get("/api/admin/settings/work-15s")
+async def admin_work_15s_settings(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return work_reply.settings_view()
+
+
+@app.patch("/api/admin/settings/work-15s")
+async def admin_work_15s_save(body: Work15Patch, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    reason = work_reply.unavailable_reason()
+    if body.enabled and reason:
+        raise HTTPException(422, reason)
+    store.set_setting(WORK_15S_KEY, "1" if body.enabled else "0")
+    config.set_work_15s(body.enabled)
+    if body.concurrency is not None:
+        await _save_window_concurrency(body.concurrency)
+    return work_reply.settings_view()
+
+
+class WindowConcurrencyPatch(BaseModel):
+    concurrency: int = Field(..., ge=1, strict=True)
+
+
+def _window_concurrency_settings():
+    return {"concurrency": config.WORK_15S_CONCURRENCY,
+            "max_concurrency": None,
+            "active": window_concurrency.slots.active,
+            "waiting": window_concurrency.slots.waiting,
+            "global_concurrency": pool.max_concurrency}
+
+
+async def _save_window_concurrency(value):
+    store.set_setting(WORK_15S_CONCURRENCY_KEY, str(value))
+    config.WORK_15S_CONCURRENCY = value
+    await window_concurrency.slots.notify_changed()
+
+
+@app.get("/api/admin/settings/window-concurrency")
+async def admin_window_concurrency(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return _window_concurrency_settings()
+
+
+@app.patch("/api/admin/settings/window-concurrency")
+async def admin_save_window_concurrency(body: WindowConcurrencyPatch,
+                                        x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    await _save_window_concurrency(body.concurrency)
+    return _window_concurrency_settings()
+
+
+class ResponderPatch(BaseModel):
+    enabled: bool | None = None
+    base_url: str | None = None
+    api_key: str | None = None        # None / 不传 = 保持；空字符串 = 清除
+    model: str | None = None
+
+
+def _load_responder() -> dict:
+    try:
+        saved = json.loads(store.get_setting(RESPONDER_KEY) or "{}")
+    except ValueError:
+        saved = {}
+    return dola_responder.apply_settings(saved)
+
+
+@app.get("/api/admin/settings/responder")
+async def admin_responder_settings(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return dola_responder.public_settings()
+
+
+@app.patch("/api/admin/settings/responder")
+async def admin_responder_settings_save(body: ResponderPatch, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    current = dict(dola_responder.SETTINGS)
+    for key, value in body.model_dump(exclude_unset=True).items():
+        if value is None:
+            continue
+        current[key] = value
+    base = str(current.get("base_url") or "").strip()
+    if base and not re.match(r"^https?://", base):
+        raise HTTPException(422, "接口地址需以 http:// 或 https:// 开头")
+    store.set_setting(RESPONDER_KEY, json.dumps(dola_responder.apply_settings(current), ensure_ascii=False))
+    return dola_responder.public_settings()
+
+
+def _responder_form_settings(body: ResponderPatch | None) -> dict:
+    """面板里当前填的内容（没填的项沿用已保存的值），不保存。"""
+    current = dict(dola_responder.SETTINGS)
+    for key, value in (body.model_dump(exclude_unset=True) if body else {}).items():
+        if value is not None and (key != "api_key" or value):
+            current[key] = value
+    settings = dola_responder.normalize(current)
+    if settings["base_url"] and not re.match(r"^https?://", settings["base_url"]):
+        raise HTTPException(422, "接口地址需以 http:// 或 https:// 开头")
+    return settings
+
+
+@app.post("/api/admin/settings/responder/models")
+async def admin_responder_models(body: ResponderPatch | None = None, x_admin_key: str | None = Header(default=None)):
+    """用面板里填的地址和 Key 拉取 /v1/models，给「模型」下拉框用（服务器代请求，Key 不进浏览器跨域）。"""
+    _admin_auth(x_admin_key)
+    models, why = await dola_responder.list_models(_responder_form_settings(body))
+    if not models:
+        raise HTTPException(502 if "HTTP" in why or "请求失败" in why else 422, why)
+    return {"models": models}
+
+
+@app.post("/api/admin/settings/responder/test")
+async def admin_responder_test(body: ResponderPatch | None = None, x_admin_key: str | None = Header(default=None)):
+    """用一句示例追问试一下 AI 代答，返回它会回的话（不发给 dola）。
+
+    用面板里当前填的内容测试（没填的项沿用已保存的值），不保存；不要求已开启。"""
+    _admin_auth(x_admin_key)
+    settings = _responder_form_settings(body)
+    sample = "この動画はすでに生成されています。追加の生成や調整が必要な場合はお知らせください。"
+    reply, why = await dola_responder.ai_reply_detail(sample, "16:9", 10, 1, settings=settings)
+    if not reply:
+        raise HTTPException(422 if not dola_responder.configured(settings) else 502, why)
+    return {"sample": sample, "reply": reply, "saved": settings == dola_responder.SETTINGS}
+
+
+@app.post("/api/admin/tasks/{task_id}/upscale")
+async def admin_task_upscale(task_id: str, body: UpscaleRequest, x_admin_key: str | None = Header(default=None)):
+    """对一条已完成的视频发起超分（异步）。fal 按输出秒数计费，前端发起前会确认。"""
+    _admin_auth(x_admin_key)
+    settings = upscale.load_settings(store)
+    if not settings["enabled"]:
+        raise HTTPException(409, "视频超分功能已关闭，请先在设置中开启")
+    row = store.get(task_id)
+    if not row:
+        raise HTTPException(404, "task not found")
+    if row.get("status") != "completed" or not row.get("video_url"):
+        raise HTTPException(409, "只有已完成且视频还在的任务才能超分")
+    if row.get("upscale_status") in ("queued", "processing") or task_id in UPSCALING:
+        raise HTTPException(409, "这条视频正在超分")
+    if row.get("upscale_status") == "completed" and not body.force:
+        raise HTTPException(409, "这条视频已经超分过；要重做请确认后再提交（会再次计费）")
+    provider = body.provider or settings["provider"]
+    if provider not in upscale.PROVIDERS:
+        raise HTTPException(422, f"provider 只能是 {', '.join(upscale.PROVIDERS)}")
+    problem = upscale.missing_config(settings, provider)
+    if problem:
+        raise HTTPException(400, f"{problem}：请先在「视频超分」设置里填写")
+    if row.get("upscale_file"):
+        try:
+            (Path(config.DOWNLOAD_DIR) / Path(row["upscale_file"]).name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    store.update(task_id, upscale_status="queued", upscale_provider=provider,
+                 upscale_target=settings.get("target") or "1080p", upscale_job=None, upscale_url=None,
+                 upscale_file=None, upscale_error="", upscale_size=None, upscale_seconds=None,
+                 upscale_started_at=time.time(), upscale_finished_at=None)
+    asyncio.create_task(_run_upscale(task_id))
+    seconds = row.get("video_duration") or row.get("duration")
+    return {"ok": True, "status": "queued", "provider": provider,
+            "target": settings.get("target") or "1080p",
+            "estimated_cost_usd": upscale.estimate_cost(provider, seconds)}
+
+
+@app.get("/v1/videos/{task_id}", response_model=TaskResponse)
+async def get_video(task_id: str, authorization: str | None = Header(default=None)):
+    client = _auth(authorization)
+    row = store.get_for_client(task_id, client["api_key_hash"])
+    if not row:
+        raise HTTPException(404, "task not found")
+    status, video_url, video_url_hd = _client_video(row)
+    return TaskResponse(
+        id=row["id"], status=status, model=row["model"],
+        prompt=row["prompt"], video_url=video_url, error=row["error"], videos=_task_videos(row) or None,
+        progress=_progress_payload(status=status, created_at=row["created_at"],
+                                   duration=row["duration"]),
+        video_url_hd=video_url_hd,
+        resolution=row.get("requested_resolution"), upscale_note=_upscale_note(row),
+    )
+
+
+
+@app.get("/v1/videos/{task_id}/content")
+async def get_video_content(task_id: str, authorization: str | None = Header(default=None)):
+    """new-api 任务插件兼容端点：把已完成的视频文件内容返回给客户端。"""
+    client = _auth(authorization)
+    row = store.get_for_client(task_id, client["api_key_hash"])
+    if not row:
+        raise HTTPException(404, "task not found")
+    status, video_url, video_url_hd = _client_video(row)
+    if status != "completed" or not video_url:
+        raise HTTPException(409, "video not ready")
+    if video_url_hd and video_url == video_url_hd:   # 自动超分的成片
+        return _upscaled_video(row["id"], row.get("upscale_target") or "1080p")
+    if row.get("video_link"):
+        link = await video_link.current_link(row, store)
+        if link:
+            return RedirectResponse(link, status_code=302, headers={"Cache-Control": "private, max-age=60"})
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(row["video_url"]) as resp:
+            if resp.status != 200:
+                raise HTTPException(502, "failed to fetch video from upstream")
+            content_type = resp.headers.get("Content-Type", "video/mp4")
+            data = await resp.read()
+    return Response(content=data, media_type=content_type)
+
+
+
+class ImageGenRequest(BaseModel):
+    model: str = "doubao-seedream-5.0-flash"
+    prompt: str = Field(..., min_length=1)
+    n: int | None = Field(None, ge=1, le=4)
+    size: str | None = None
+    ratio: str | None = None
+    response_format: str = "url"           # url / b64_json
+    # 参考图（图生图 / 改图）：URL、data URL 都行；edits 的 multipart 文件也会转成这里
+    reference_images: list[str] = Field(default_factory=list)
+    image: Any = None
+    image_url: Any = None
+    images: Any = None
+
+
+def _image_response(result: dict, response_format: str) -> dict:
+    data = []
+    for item in result.get("images") or []:
+        path = Path(item["local_path"])
+        if response_format == "b64_json":
+            data.append({"b64_json": base64.b64encode(path.read_bytes()).decode()})
+        else:
+            data.append({"url": f"{config.PUBLIC_BASE}/videos/{path.name}"})
+    return {"created": int(time.time()), "data": data,
+            "model": result.get("model"), "account": result.get("account"),
+            "unwatermarked": result.get("unwatermarked")}
+
+
+async def _generate_images(client, raw: dict) -> dict:
+    try:
+        req = ImageGenRequest.model_validate(raw)
+    except Exception as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not sites.is_image_model(req.model):
+        raise HTTPException(422, f"不支持的生图模型 {req.model!r}，可用：{'、'.join(sites.IMAGE_MODELS)}")
+    refs = _normalize_image_refs(req.reference_images, req.image, req.image_url, req.images)
+    refs = list(dict.fromkeys(refs + _deep_image_urls(raw)))
+    if len(req.prompt) > config.MAX_PROMPT_CHARS:
+        raise HTTPException(422, f"提示词过长（上限 {config.MAX_PROMPT_CHARS} 字符）")
+    root = None
+    paths: list[str] = []
+    job_id = "img_" + uuid.uuid4().hex[:16]
+    try:
+        if refs:
+            try:
+                refs = await validate_reference_urls(refs)
+                refs = await asyncio.to_thread(materialize_data_urls, refs)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            root, paths = await download_reference_images(refs, job_id)
+        started = time.time()
+        try:
+            result = await asyncio.wait_for(pool.generate_image(
+                req.prompt, req.model, ratio=req.ratio, size=req.size, n=req.n,
+                reference_image_paths=paths or None,
+                deadline=time.time() + config.IMAGE_REQUEST_TIMEOUT), timeout=config.IMAGE_REQUEST_TIMEOUT + 60)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, f"生图超时（{config.IMAGE_REQUEST_TIMEOUT} 秒）")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, failure_text.summarize(str(exc))) from exc
+        print(f"[image] {client.get('api_key_name') or ''} {req.model} → {result.get('account')} "
+              f"{len(result.get('images') or [])} 张，{time.time() - started:.1f}s", flush=True)
+        return _image_response(result, req.response_format)
+    finally:
+        if root:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+@app.post("/v1/images/generations")
+async def create_image(request: Request, authorization: str | None = Header(default=None)):
+    """OpenAI 兼容生图（同步返回）：doubao-seedream-* 派给豆包号（只接豆包生图）。"""
+    client = _auth(authorization)
+    try:
+        raw = await request.json()
+    except Exception:
+        raise HTTPException(400, "invalid json body")
+    return await _generate_images(client, raw or {})
+
+
+@app.post("/v1/images/edits")
+async def edit_image(request: Request, authorization: str | None = Header(default=None)):
+    """OpenAI 兼容改图 / 图生图：multipart（image / image[] 文件）或 JSON（reference_images 等 URL 字段）。"""
+    client = _auth(authorization)
+    content_type = (request.headers.get("content-type") or "").lower()
+    if content_type.startswith(("multipart/form-data", "application/x-www-form-urlencoded")):
+        raw = await _raw_from_multipart(request)
+    else:
+        try:
+            raw = await request.json()
+        except Exception:
+            raise HTTPException(400, "invalid json body")
+    return await _generate_images(client, raw or {})
+
+
+@app.get("/v1/models")
+async def list_models():
+    """OpenAI 风格模型列表，供 new-api 等上游获取模型用。"""
+    return {
+        "object": "list",
+        "data": [
+            {"id": DOLA_V20_PUBLIC, "object": "model", "owned_by": "Dola Studio", "created": 0},
+            {"id": "seedance-2.5", "object": "model", "owned_by": "Dola Studio", "created": 0},
+        ] + [
+            {"id": name, "object": "model", "owned_by": "Dola Studio", "created": 0}
+            for name in sites.DOUBAO_MODELS
+        ] + [
+            {"id": name, "object": "model", "owned_by": "Dola Studio", "created": 0}
+            for name in sites.IMAGE_MODELS
+        ],
+    }
+
+
+# ===== 火山 Ark 任务式协议兼容端点（画布工具） =====
+
+ARK_STATUS_MAP = {
+    "queued": "queued",
+    "processing": "running",
+    "completed": "succeeded",
+    "failed": "failed",
+}
+
+
+async def ark_create_task(body: dict, authorization: str | None = Header(default=None)):
+    """POST .../contents/generations/tasks：Ark 风格创建，复用 dola 出片流程。"""
+    client = _auth(authorization)
+    body = body or {}
+    _log_image_fields(body, "ark")
+    prompt_parts: list[str] = []
+    reference_images: list[str] = []
+    for item in body.get("content") or []:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").lower()
+        if item_type == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                prompt_parts.append(text)
+        elif item_type in ("image_url", "image"):
+            url_obj = item.get("image_url")
+            url = url_obj.get("url") if isinstance(url_obj, dict) else url_obj
+            if isinstance(url, str) and url.strip():
+                reference_images.append(url.strip())
+    # 顶层兼容：部分画布工具把图片放在顶层 image_url/image 字段
+    reference_images = _normalize_image_refs(
+        reference_images, body.get("image_url"), body.get("image"),
+        body.get("input_image"), body.get("input_images"),
+    )
+    reference_images = list(dict.fromkeys(reference_images + _deep_image_urls(body)))
+    prompt = "\n".join(prompt_parts).strip()
+    # Ark 写法：顶层 resolution，或提示词里的 --resolution 1080p / --rs 1080p（不发给 Dola）；
+    # 也认 metadata / extra_body 等嵌套位置（和 /v1/videos 同一套规则）
+    resolution, prompt, source = _request_resolution(body, prompt)
+    _log_request_fields(body, "ark", resolution, source)
+    if not prompt:
+        raise HTTPException(422, "content 中缺少 text 提示词")
+    requested_model = body.get("model")
+    ratio = _map_ark_ratio(body.get("ratio") or _nested_value(body, ("ratio", "aspect_ratio")))
+    if reference_images:
+        print(f"[api] Ark 收到参考图 {len(reference_images)} 张", flush=True)
+    if (body.get("execution_mode") or default_execution_mode(requested_model)) in ("force15", "work", "chat"):
+        try:
+            seconds = int(body.get("duration") or body.get("seconds") or 15)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "工作模式时长无效")
+        resp = await _submit_task(client, requested_model, prompt, ratio, seconds, reference_images,
+                                  reference_source=body.get("reference_source"), resolution=resolution,
+                                  execution_mode=body.get("execution_mode") or default_execution_mode(requested_model), video_count=body.get("video_count", 1),
+                                  reference_audio_urls=reference_audio.audio_urls(body))
+        return {"id": resp.id, "status": resp.status}
+    if sites.is_doubao_model(requested_model):
+        try:
+            seconds = int(body.get("duration") or body.get("seconds") or 5)
+        except (TypeError, ValueError):
+            seconds = 5
+        resp = await _submit_task(client, requested_model, prompt, ratio, seconds, reference_images,
+                                  reference_source=body.get("reference_source"), resolution=resolution,
+                                  execution_mode=body.get("execution_mode", "auto"), video_count=body.get("video_count", 1), reference_audio_urls=reference_audio.audio_urls(body))
+        return {"id": resp.id, "status": resp.status}
+    version = _model_version(requested_model)
+    if version is not None:
+        # 显式指定了版本：只在该版本支持的时长里就近取档。
+        allowed = [
+            d for d in client["allowed_durations"]
+            if d in _supported_durations_for(version)
+        ]
+    else:
+        # 模型名无法识别：先按请求时长取档，再由时长挑一个支持的 seedance 版本。
+        allowed = [
+            d for d in client["allowed_durations"]
+            if d in SUPPORTED_DURATIONS
+        ]
+    # 部分画布工具用 seconds 传时长（new-api 的 sora 插件也会改写成 seconds）。
+    duration = _pick_duration(body.get("duration") or body.get("seconds"), allowed)
+    model = _resolve_model_for_duration(requested_model, duration)
+    if model is None:
+        raise HTTPException(
+            422,
+            "不支持的模型/时长组合："
+            f"模型={requested_model!r}，时长={duration}秒"
+            f"（seedance-2.5 支持 {_supported_durations_for('seedance-2.5')} 秒，"
+            f"seedance-2.0-fast 仅支持 {list(config.V20_DURATIONS)} 秒）",
+        )
+    resp = await _submit_task(client, model, prompt, ratio, duration, reference_images,
+                              reference_source=body.get("reference_source"), resolution=resolution,
+                              execution_mode=body.get("execution_mode", "auto"), video_count=body.get("video_count", 1), reference_audio_urls=reference_audio.audio_urls(body))
+    return {"id": resp.id, "status": resp.status}
+
+
+async def ark_get_task(task_id: str, authorization: str | None = Header(default=None)):
+    """GET .../contents/generations/tasks/{id}：Ark 风格查询。"""
+    client = _auth(authorization)
+    row = store.get_for_client(task_id, client["api_key_hash"])
+    if not row:
+        raise HTTPException(404, "task not found")
+    status, video_url, _hd = _client_video(row)
+    result = {
+        "id": row["id"],
+        "model": row["model"],
+        "status": ARK_STATUS_MAP.get(status, status),
+        "created_at": int(row["created_at"]),
+        "updated_at": int(row.get("updated_at") or row["created_at"]),
+    }
+    if status == "completed" and video_url:
+        result["content"] = {"video_url": video_url}
+    if _task_videos(row):
+        result["videos"] = _task_videos(row)
+    if row.get("error"):
+        result["error"] = row["error"]
+    if row.get("requested_resolution"):
+        result["resolution"] = row["requested_resolution"]
+        note = _upscale_note(row)
+        if note:
+            result["upscale_note"] = note
+    return result
+
+
+ARK_TASK_PATHS = (
+    "/v1/video/contents/generations/tasks",
+    "/api/v3/contents/generations/tasks",
+    "/v1/contents/generations/tasks",
+    "/seedance/v3/contents/generations/tasks",
+)
+for _ark_path in ARK_TASK_PATHS:
+    app.add_api_route(_ark_path, ark_create_task, methods=["POST"])
+    app.add_api_route(_ark_path + "/{task_id}", ark_get_task, methods=["GET"])
+
+
+@app.get("/health")
+
+
+async def health(response: Response = None):
+    if response is not None:
+        response.headers['Cache-Control'] = 'no-store'
+    return public_health(
+        version=APP_VERSION, engine=pool.engine_snapshot(), storage=store.storage_stats(),
+        downloads=config.DOWNLOAD_DIR, retention=config.TASK_RETENTION_DAYS,
+        progress=store.queue_progress(created_at=None, duration=None),
+        pending=store.pending_task_count(), workers=_global_concurrency_limit(),
+        login=ADD_ACCOUNT_SEM.snapshot(), add_jobs=len(_running_add_jobs()) + ADD_ACCOUNT_SEM.active,
+        eta=_eta_text, available=pool.available, max_pending=config.MAX_PENDING_TASKS)
+
+
+# ===== 管理面板 API =====
+
+
+class AdminLogin(BaseModel):
+    username: str
+    password: str
+
+
+class AdminUserCreate(BaseModel):
+    username: str
+    password: str
+    role: str = "admin"
+
+
+class AdminUserUpdate(BaseModel):
+    username: str | None = None
+    password: str | None = None
+    enabled: bool | None = None
+
+
+class ProxyCreate(BaseModel):
+    name: str
+    protocol: str = "http"
+    # 动态IP（mode="extract"）不填网关地址也行：出口由节点池里的节点决定
+    host: str = ""
+    port: int = Field(0, ge=0, le=65535)
+    username: str = ""
+    password: str = ""
+    remark: str = ""
+    # static = 一条记录一个固定出口；dynamic = 隧道/旋转网关，按 username 里的
+    # sticky session 决定出口 IP，每个号自动分配一个独立 session。
+    mode: str = "static"
+    session_template: str = ""
+    sticky_ttl: int = Field(0, ge=0)
+    rotate_on_risk: bool = True
+    rotate_min_interval: int = Field(0, ge=0)
+    # mode="extract" 时用：调这个链接拿一批可直接使用的 host:port:user:pass
+    extract_url: str = ""
+    extract_interval: int = Field(0, ge=0)
+    # mode="extract" 时也可以直接把节点粘进来（一行一个 host:port:user:pass），
+    # 与提取链接二选一即可，都填就先建代理再把粘进来的节点入池。
+    nodes_text: str = ""
+
+
+class ProxyUpdate(BaseModel):
+    name: str | None = None
+    protocol: str | None = None
+    host: str | None = None
+    port: int | None = Field(None, ge=0, le=65535)
+    username: str | None = None
+    password: str | None = None
+    remark: str | None = None
+    enabled: bool | None = None
+    mode: str | None = None
+    session_template: str | None = None
+    sticky_ttl: int | None = Field(None, ge=0)
+    rotate_on_risk: bool | None = None
+    rotate_min_interval: int | None = Field(None, ge=0)
+    extract_url: str | None = None
+    extract_interval: int | None = Field(None, ge=0)
+
+
+class ProxyNodesIn(BaseModel):
+    # 手工粘贴的节点：一行一个 host:port:user:pass（兼容 user:pass@host:port 等）
+    text: str = ""
+    # 有效期（秒）：None = 带 sessiontime-N 的按它算，其余默认不过期；0 = 全部不过期
+    ttl: int | None = None
+
+
+class AccountProxyBind(BaseModel):
+    proxy_id: str | None = None
+
+
+class StressRequest(BaseModel):
+    max_concurrency: int = Field(8, ge=1, le=12)
+    hold_seconds: float = Field(5.0, ge=3.0, le=15.0)
+
+
+class AccountPatch(BaseModel):
+    scheduling: bool | None = None
+    note: str | None = None
+    email: str | None = None
+
+
+class RecoverBody(BaseModel):
+    """人工恢复：kind=risk（风控组）| abnormal（异常组）；批量恢复时带 names。"""
+
+    kind: str = "risk"
+    names: list[str] = []
+
+
+class PreferBody(BaseModel):
+    preferred: bool = True
+
+
+class WeightBody(BaseModel):
+    weight: int = Field(1, ge=1, le=100)
+
+
+class BindProxiesBody(BaseModel):
+    proxies: list[str]
+    force: bool = False
+    mode: str = "sticky"
+
+
+class BatchAccountsBody(BaseModel):
+    """批量操作（勾选账号后一键处理）。"""
+    names: list[str] = Field(default_factory=list)
+
+
+class CookieExportBody(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=500)
+
+
+class BatchProxyBody(BaseModel):
+    names: list[str] = Field(default_factory=list)
+    proxy_id: str | None = None
+
+
+class ImportTextBody(BaseModel):
+    text: str = ""
+    skip_verify: bool = False
+    # Cookie 头格式不带域名：dola（默认）/ doubao。JSON 格式自带域名，自动识别。
+    site: str = "dola"
+    proxy_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class AccountAdd(BaseModel):
+    name: str
+    email: str = ""
+    password: str = ""
+    totp: str = ""
+    recovery_email: str = ""
+    mail_api: str = ""
+    cookies: str = ""
+    cookie_skip_verify: bool = False
+    proxy_id: str | None = None
+    login_method: Literal["google", "apple"] = "google"
+
+
+class AppleLoginAnswer(BaseModel):
+    challenge_id: str = Field(..., min_length=1, max_length=64)
+    code: str = Field("", max_length=16)
+
+
+class KeyCreate(BaseModel):
+    name: str = ""
+    daily_limit: int = Field(0, ge=0, le=1_000_000)
+    concurrency_limit: int = Field(0, ge=0, le=1_000)
+    allowed_durations: list[int] = Field(default_factory=lambda: list(SUPPORTED_DURATIONS))
+    expires_at: float | None = Field(None, ge=0)
+
+
+class KeyPatch(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    daily_limit: int | None = Field(None, ge=0, le=1_000_000)
+    concurrency_limit: int | None = Field(None, ge=0, le=1_000)
+    allowed_durations: list[int] | None = None
+    expires_at: float | None = Field(None, ge=0)
+
+
+@app.post("/api/admin/login")
+async def admin_login(body: AdminLogin):
+    user = user_verify(body.username.strip(), body.password)
+    if not user:
+        raise HTTPException(401, "用户名或密码错误")
+    token = secrets.token_urlsafe(32)
+    ADMIN_SESSIONS[token] = {
+        "username": user["username"],
+        "role": user["role"],
+        "expires_at": time.time() + ADMIN_SESSION_TTL,
+    }
+    user_store.save_session(token, **ADMIN_SESSIONS[token])
+    return {
+        "ok": True,
+        "auth_required": True,
+        "token": token,
+        "username": user["username"],
+        "role": user["role"],
+    }
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    user_store.delete_session(x_admin_key)
+    ADMIN_SESSIONS.pop(x_admin_key, None)
+    return {"ok": True}
+
+
+@app.get("/api/admin/accounts")
+async def admin_accounts(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    accounts = pool.list_accounts(processing_accounts=store.busy_account_ids())
+    sessions = proxy_store.sessions_snapshot()
+    for acc in accounts:
+        info = get_account_proxy(acc["name"])
+        acc["proxy_id"] = info["id"] if info else None
+        acc["proxy_name"] = info["name"] if info else None
+        acc["proxy_mode"] = info.get("mode") if info else None
+        sess = sessions.get(acc["name"]) or {}
+        acc["ip_session"] = sess.get("session", "")
+        acc["exit_ip"] = sess.get("last_exit_ip", "")
+        acc["exit_probe_at"] = sess.get("last_probe_at", 0)
+        acc["exit_probe_ok"] = bool(sess.get("last_probe_ok"))
+        acc["exit_probe_detail"] = sess.get("last_probe_detail", "")
+        import proxy_region
+        region = proxy_region.account_state(acc['name'])
+        acc['proxy_region_rejected'] = bool(region.get('rejected'))
+        acc['proxy_country_code'] = region.get('country_code') or ''
+        acc['proxy_region_detail'] = region.get('detail') or ''
+    return {
+        "v20_durations": list(config.V20_DURATIONS),
+        "accounts": accounts,
+        "add_jobs": dict(JOBS),
+        "deleting_accounts": sorted(DELETING_ACCOUNTS),
+        "delete_errors": dict(ACCOUNT_DELETE_ERRORS),
+        "engine": pool.engine_snapshot(),
+        "next_reset_at": pool.next_quota_reset_at(),
+        "reset_tz": config.LIMIT_RESET_TZ,
+        "reset_hour": config.LIMIT_RESET_HOUR,
+        # 出口限流退避中的出口 + 共用出口提醒阈值（面板据此提示"同一出口号太多"）
+        "egress_throttle": pool.egress_throttle_snapshot(),
+        "egress_share_warn": config.EGRESS_SHARE_WARN,
+        **_group_summary(accounts, JOBS),
+    }
+
+
+def _group_summary(accounts: list, add_jobs: dict | None = None) -> dict:
+    from retry_state import is_incomplete_account
+    return account_summary(accounts, add_jobs, deleted=DELETING_ACCOUNTS,
+                           group_order=GROUP_ORDER, active_groups=ACTIVE_GROUPS,
+                           incomplete=is_incomplete_account)
+
+
+def _running_add_jobs() -> list[str]:
+    return [name for name, job in JOBS.items()
+            if job.get("status") in ("running", "cancelling")]
+
+
+async def _run_stress_job(max_concurrency: int, hold_seconds: float):
+    try:
+        result = await run_stress(max_concurrency, hold_seconds)
+        STRESS_RUN.update(
+            status="completed",
+            finished_at=time.time(),
+            recommended=result["recommended"],
+            results=result["results"],
+            logs=result["logs"],
+        )
+    except Exception as exc:
+        STRESS_RUN.update(
+            status="failed",
+            finished_at=time.time(),
+            logs=STRESS_RUN.get("logs", []) + [f"压测异常: {exc}"],
+        )
+
+
+@app.get("/api/admin/stress")
+async def admin_stress_status(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return {
+        **STRESS_RUN,
+        "busy_tasks": store.pending_task_count(),
+        "running_jobs": len(_running_add_jobs()),
+    }
+
+
+@app.post("/api/admin/stress")
+async def admin_stress_start(body: StressRequest,
+                             x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    if STRESS_RUN.get("status") == "running":
+        raise HTTPException(409, "压力测试正在进行中，请等待完成")
+    busy = store.pending_task_count()
+    if busy:
+        raise HTTPException(
+            409, f"当前有 {busy} 个视频任务在排队/运行，请先等待任务结束再压测"
+        )
+    adding = _running_add_jobs()
+    if adding:
+        raise HTTPException(
+            409, "当前有账号登录任务进行中：" + "、".join(adding[:5])
+        )
+    STRESS_RUN.clear()
+    STRESS_RUN.update(
+        status="running",
+        started_at=time.time(),
+        finished_at=None,
+        recommended=None,
+        results=[],
+        logs=["压力测试开始：从 1 个浏览器逐级加压…"],
+    )
+    asyncio.create_task(_run_stress_job(body.max_concurrency, body.hold_seconds))
+    return {**STRESS_RUN, "busy_tasks": 0, "running_jobs": 0}
+
+
+@app.patch("/api/admin/accounts/{name}")
+async def admin_account_patch(name: str, body: AccountPatch,
+                              x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    if body.scheduling is not None:
+        pool.set_scheduling(name, body.scheduling)
+    if body.note is not None:
+        pool.set_note(name, body.note)
+    if body.email is not None:
+        pool.set_email(name, body.email)
+    return {"ok": True}
+
+
+def _account_row(name: str) -> dict | None:
+    """单个账号的面板视图（含分组），用于恢复/探测后回显新状态。"""
+    return next((a for a in pool.list_accounts(processing_accounts=store.busy_account_ids())
+                 if a["name"] == name), None)
+
+
+@app.get("/api/admin/accounts/{name}/note-detail")
+async def admin_account_note_detail(name: str, response: Response,
+                                    x_admin_key: str | None = Header(default=None)):
+    """按需读取备注和加密保存的辅助资料，不返回登录密码或 TOTP。"""
+    _admin_auth(x_admin_key)
+    in_pool = name in pool.accounts
+    if not in_pool and JOBS.get(name, {}).get("kind") != "add":
+        raise HTTPException(404, "account not found", headers={"Cache-Control": "no-store"})
+    row = (_account_row(name) or {}) if in_pool else {}
+    creds = cred_store.load(name) or {}
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return {"name": name, "note": row.get("note") or "", "editable": in_pool,
+            "recovery_email": creds.get("recovery_email") or "",
+            "mail_api": creds.get("mail_api") or ""}
+
+
+@app.post("/api/admin/accounts/{name}/recover")
+async def admin_account_recover(name: str, body: RecoverBody,
+                                x_admin_key: str | None = Header(default=None)):
+    """把号从【风控】/【异常】组放回正常流程（风控恢复后回到【待激活】，要重新探测）。"""
+    _admin_auth(x_admin_key)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    if body.kind not in ("risk", "abnormal"):
+        raise HTTPException(400, "kind 只能是 risk 或 abnormal")
+    result = pool.recover_account(name, body.kind)
+    return {**result, "account": _account_row(name)}
+
+
+@app.post("/api/admin/accounts/{name}/probe-hello")
+async def admin_account_probe_hello(name: str,
+                                    x_admin_key: str | None = Header(default=None)):
+    """手动发一句「你好」判风控（强制真探，不吃缓存），返回回复原文与登录标记。"""
+    _admin_auth(x_admin_key)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    probe = await pool.probe_hello_async(name, force=True)
+    return {"ok": True, "probe": probe, "account": _account_row(name)}
+
+
+class RenameAccount(BaseModel):
+    new_name: str
+
+
+@app.post("/api/admin/accounts/{name}/rename")
+async def admin_account_rename(name: str, body: RenameAccount,
+                               x_admin_key: str | None = Header(default=None)):
+    """给账号改名（profile 目录、代理绑定、今日额度、登录凭据一起搬）。"""
+    _admin_auth(x_admin_key)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    try:
+        result = pool.rename_account(name, body.new_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@app.delete("/api/admin/accounts/{name}")
+async def admin_account_delete(name: str, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return await _request_account_delete(name)
+
+
+@app.post("/api/admin/accounts/{name}/verify")
+async def admin_account_verify(name: str, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        result = await _verify_account_once(name)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        # 验证流程里浏览器/playwright/SQLite 等其它异常不再冒泡成 500：
+        # 统一转 409 并给出原因（不落地 login_ok，避免误标，非破坏）。
+        raise HTTPException(409, f"验证失败（服务器异常）: {str(e)[:200]}")
+    return result
+
+
+async def _verify_account_once(name: str) -> dict:
+    async with pool.login_recovery(name):
+        # Do not launch a background refresh just after a manual flow failed.
+        LAST_CRED_REFRESH[name] = time.time()
+        return await _verify_account_once_impl(name)
+
+
+async def _verify_account_once_impl(name: str) -> dict:
+    """单账号验证（登录态失效时用加密凭据自动重登一次）。
+
+    返回 {"ok": bool, "refreshed": bool, "reason": str}；账号忙 / 不存在等异常向上抛。
+    reason 是失败原因（成功时为空串），面板用它显示「为什么失效」。
+    """
+    ok, reason = await pool.verify_account_detail(name)
+    refreshed = False
+    if not ok:
+        acct = next((a for a in pool.list_accounts() if a["name"] == name), {})
+        creds = None if acct.get("source") == "apple" else cred_store.load(name)
+        if creds and creds.get("password"):
+            try:
+                async with ADD_ACCOUNT_SEM, pool._use_account(name, "verifying"):
+                    ADD_SEM_HOLDER["what"] = f"{name} 验证重登"
+                    pool._phases[name] = "正在自动重新登录，等待最终结果"
+                    try:
+                        await add_account_flow(
+                            name, creds["email"], creds["password"], creds.get("totp") or "",
+                            force_login=True)
+                        pool.set_email(name, creds["email"])
+                        pool.set_login_status(name, True)
+                        ok, reason = await pool._verify_account_detail_locked(name)
+                    finally:
+                        ADD_SEM_HOLDER["what"] = ""
+                refreshed = True
+            except Exception as exc:
+                ok = False
+                refreshed = False
+                reason = f"自动重登失败: {redact_error(exc)[:160]}"
+    return {"ok": ok, "refreshed": refreshed, "reason": reason}
+
+
+def _clean_batch_names(names: list[str]) -> list[str]:
+    """去空、去重、保持勾选顺序；上限 500 个防止误提交超大请求。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in names or []:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out[:500]
+
+
+async def _run_batch_verify_job(job_id: str, names: list[str]) -> None:
+    """逐个验证勾选的账号，进度写回 BATCH_JOBS 供面板轮询。"""
+    job = BATCH_JOBS[job_id]
+    try:
+        async with BATCH_VERIFY_SEM:
+            for name in names:
+                job["current"] = name
+                item = {"name": name, "ok": None, "message": ""}
+                try:
+                    if name not in pool.accounts:
+                        item["message"] = "账号不存在"
+                    else:
+                        result = await _verify_account_once(name)
+                        item["ok"] = bool(result["ok"])
+                        item["message"] = "有效" if item["ok"] else "失效"
+                        if result["refreshed"]:
+                            item["message"] += "（已自动重登）"
+                except Exception as exc:
+                    item["message"] = str(exc)[:200] or "验证失败"
+                job["results"].append(item)
+                job["done"] = len(job["results"])
+                job["ok_count"] = sum(1 for r in job["results"] if r["ok"])
+                job["failed_count"] = sum(1 for r in job["results"] if r["ok"] is False)
+        job["status"] = "completed"
+    except Exception as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)[:300]
+    finally:
+        job["current"] = ""
+        job["finished_at"] = time.time()
+
+
+async def _run_batch_probe_job(job_id: str, names: list[str]) -> None:
+    """批量「你好」探测：并发受 BATCH_PROBE_SEM 限制，进度写回 BATCH_JOBS 供面板轮询。
+
+    结论口径（与单号探测一致）：
+      ok         → 登录有效且有回复；
+      logged_out → 被登出 → 该号进【风控】组；
+      no_reply   → 一句回复都没有 → 进【风控】组；
+      error      → 探测没跑成（网络不通 / 上游 710022002 拒绝）→ **不锁号**，只记"未完成"；
+      skipped    → 非纯 API 账号（浏览器登录号）。
+    """
+    job = BATCH_JOBS[job_id]
+    # 并发 0 = 不限（全部放开）；>0 才建信号量。
+    # 信号量在协程内部创建：模块级 asyncio 原语会绑死在"第一个"事件循环上。
+    sem = (asyncio.Semaphore(BATCH_PROBE_CONCURRENCY)
+           if BATCH_PROBE_CONCURRENCY > 0 else _NoLimit())
+    label = {
+        "ok": "通过",
+        "logged_out": "被登出 → 已进【风控】组",
+        "no_reply": "没回复 → 已进【风控】组",
+        "error": "探测未完成（网络/上游拒绝，不判风控）",   # 实际展示时会带上具体原因
+        "skipped": "非纯 API 账号，跳过",
+        "unconfirmed": "浏览器探测未确认（不判风控）",
+    }
+
+    async def probe_one(name: str) -> None:
+        item = {"name": name, "ok": None, "status": "", "message": "", "reply": "",
+                "group": "", "attempts": 0}
+        try:
+            if name not in pool.accounts:
+                item["message"] = "账号不存在"
+            else:
+                async with sem:
+                    job["current"] = name
+                    # 出口被上游限流中：不发请求、不等间隔、不重试，直接记「未完成」
+                    throttled = pool.egress_throttle_remaining(name) > 0
+                    if not throttled:
+                        await asyncio.sleep(BATCH_PROBE_INTERVAL_SECONDS)   # 错峰，别打爆上游
+                    # 第一次只记结论、不判风控（单次"没回复"多半是上游抖动，一次就锁会误封好号）
+                    result = await pool.probe_hello_async(name, force=True, apply_risk=False)
+                    item["attempts"] = 0 if result.get("throttled") else 1
+                    if result.get("throttled"):
+                        pass
+                    elif result.get("status") == "logged_out":
+                        # 「被登出」是强信号，一次就判风控（重试也救不回来）
+                        pool.apply_probe_risk(name, result)
+                    elif (result.get("status") == "error"
+                          and pool.egress_throttle_remaining(name) > 0):
+                        # 第一次就吃了上游限流：出口已进入退避，重试也只会被跳过，
+                        # 保留第一次的真实原因（710022002）即可
+                        pass
+                    elif result.get("status") in ("error", "no_reply"):
+                        # 网络抖动 / 没回复 → 退避重试一次，仍失败才判风控（两振出局）
+                        await asyncio.sleep(BATCH_PROBE_RETRY_SECONDS)
+                        result = await pool.probe_hello_async(name, force=True, apply_risk=True)
+                        item["attempts"] = 2
+                item["status"] = str(result.get("status") or "")
+                item["ok"] = bool(result.get("ok"))
+                if item["status"] == "skipped":
+                    # A runtime deliberately bypassing this probe is not a successful check.
+                    item["ok"] = None
+                    item["attempts"] = 0
+                if item["status"] == "unconfirmed":
+                    item["ok"] = None
+                    item["attempts"] = 1 if result.get("probed") else 0
+                item["reply"] = str(result.get("reply") or "")[:40]
+                item["message"] = label.get(item["status"], str(result.get("reason") or "")[:120])
+                if item["status"] == "skipped":
+                    item["message"] = (str(result.get("reason") or label["skipped"])[:120]
+                                       + "；请使用“验证”检查登录态")
+                if item["status"] == "unconfirmed":
+                    item["message"] = str(result.get("reason") or label["unconfirmed"])[:200]
+                if item["status"] == "error" and result.get("reason"):
+                    # 把具体原因带出来（710022002 / 出口限流中还需 N 秒 / 网络错误…），
+                    # 否则面板上一排「未完成」看不出是哪种问题
+                    item["message"] = f"探测未完成：{str(result.get('reason'))[:100]}（不判风控）"
+        except Exception as exc:
+            item["message"] = str(exc)[:200] or "探测失败"
+        row = _account_row(name)
+        item["group"] = (row or {}).get("group", "")
+        job["results"].append(item)
+        job["done"] = len(job["results"])
+        job["ok_count"] = sum(1 for r in job["results"] if r["ok"])
+        # 只有"硬信号"才算未通过（进风控）；软失败（网络/上游拒绝）单列成"未完成"，
+        # 免得把一批限流噪音显示成"一堆号被风控"。
+        job["failed_count"] = sum(
+            1 for r in job["results"] if r.get("status") in ("logged_out", "no_reply"))
+        job["skipped_count"] = sum(
+            1 for r in job["results"] if r.get("status") in ("error", "skipped", "unconfirmed"))
+
+    try:
+        await asyncio.gather(*(probe_one(n) for n in names))
+        job["status"] = "completed"
+    except Exception as exc:
+        job["status"] = "failed"
+        job["error"] = str(exc)[:300]
+    finally:
+        job["current"] = ""
+        job["finished_at"] = time.time()
+
+
+async def _run_batch_recover_job(job_id: str, names: list[str], kind: str) -> None:
+    """批量把号从【风控】/【异常】组放回正常流程（风控恢复后退回【待激活】）。"""
+    job = BATCH_JOBS[job_id]
+    for name in names:
+        item = {"name": name, "ok": None, "message": "", "group": ""}
+        try:
+            if name not in pool.accounts:
+                item["message"] = "账号不存在"
+            else:
+                pool.recover_account(name, kind)
+                item["ok"] = True
+                item["message"] = ("已退出风控，回到【待激活】——要再探一次「你好」确认登录"
+                                   if kind == "risk" else "已退出异常组")
+        except Exception as exc:
+            item["ok"] = False
+            item["message"] = str(exc)[:200] or "恢复失败"
+        row = _account_row(name)
+        item["group"] = (row or {}).get("group", "")
+        job["results"].append(item)
+        job["done"] = len(job["results"])
+        job["ok_count"] = sum(1 for r in job["results"] if r["ok"])
+        job["failed_count"] = sum(1 for r in job["results"] if r["ok"] is False)
+    job["status"] = "completed"
+    job["current"] = ""
+    job["finished_at"] = time.time()
+
+
+@app.post("/api/admin/accounts/batch-recover")
+async def admin_batch_recover(body: RecoverBody,
+                              x_admin_key: str | None = Header(default=None)):
+    """批量恢复：把选中的号从【风控】/【异常】组放出来。
+
+    风控恢复后登录态会被清空（回到【待激活】），所以建议接着点一次「你好探测」确认登录。
+    """
+    _admin_auth(x_admin_key)
+    kind = body.kind or "risk"
+    if kind not in ("risk", "abnormal"):
+        raise HTTPException(400, "kind 只能是 risk 或 abnormal")
+    names = _clean_batch_names(body.names)
+    if not names:
+        raise HTTPException(400, "没有要恢复的账号（先勾选，或用分组按钮筛出一批）")
+    running = [jid for jid, item in BATCH_JOBS.items() if item.get("status") == "running"]
+    if running:
+        raise HTTPException(409, "已有批量任务在进行中，请等待完成")
+    job_id = "batch_" + uuid.uuid4().hex[:12]
+    BATCH_JOBS[job_id] = {
+        "kind": "recover",
+        "status": "running",
+        "total": len(names),
+        "done": 0,
+        "ok_count": 0,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "results": [],
+        "current": "",
+        "started_at": time.time(),
+        "finished_at": None,
+        "error": "",
+    }
+    asyncio.create_task(_run_batch_recover_job(job_id, names, kind))
+    return {"ok": True, "job_id": job_id, "total": len(names), "names": names}
+
+
+@app.post("/api/admin/accounts/batch-probe-hello")
+async def admin_batch_probe_hello(body: BatchAccountsBody,
+                                  x_admin_key: str | None = Header(default=None)):
+    """批量发「你好」探风控：被登出 / 没回复 → 进【风控】组；软失败不锁号。"""
+    _admin_auth(x_admin_key)
+    names = _clean_batch_names(body.names)
+    if not names:
+        raise HTTPException(400, "没有要探测的账号（先勾选，或用分组按钮筛出一批）")
+    running = [jid for jid, item in BATCH_JOBS.items() if item.get("status") == "running"]
+    if running:
+        raise HTTPException(409, "已有批量任务在进行中，请等待完成")
+    job_id = "batch_" + uuid.uuid4().hex[:12]
+    BATCH_JOBS[job_id] = {
+        "kind": "probe",
+        "status": "running",
+        "total": len(names),
+        "done": 0,
+        "ok_count": 0,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "results": [],
+        "current": "",
+        "started_at": time.time(),
+        "finished_at": None,
+        "error": "",
+    }
+    asyncio.create_task(_run_batch_probe_job(job_id, names))
+    return {"ok": True, "job_id": job_id, "total": len(names), "names": names}
+
+
+@app.post("/api/admin/accounts/batch-verify")
+async def admin_batch_verify(body: BatchAccountsBody,
+                             x_admin_key: str | None = Header(default=None)):
+    """一键验证：对勾选的账号逐个验证登录态（后台任务，面板轮询进度）。"""
+    _admin_auth(x_admin_key)
+    names = _clean_batch_names(body.names)
+    if not names:
+        raise HTTPException(400, "请先勾选账号")
+    running = [jid for jid, job in BATCH_JOBS.items() if job.get("status") == "running"]
+    if running:
+        raise HTTPException(409, "已有批量验证在进行中，请等待完成")
+    job_id = "batch_" + uuid.uuid4().hex[:12]
+    BATCH_JOBS[job_id] = {
+        "kind": "verify",
+        "status": "running",
+        "total": len(names),
+        "done": 0,
+        "ok_count": 0,
+        "failed_count": 0,
+        "results": [],
+        "current": "",
+        "started_at": time.time(),
+        "finished_at": None,
+        "error": "",
+    }
+    asyncio.create_task(_run_batch_verify_job(job_id, names))
+    return {"ok": True, "job_id": job_id, "total": len(names), "names": names}
+
+
+@app.get("/api/admin/batch/{job_id}")
+async def admin_batch_status(job_id: str, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    job = BATCH_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "批量任务不存在或已过期")
+    return job
+
+
+@app.post("/api/admin/accounts/batch-proxy")
+async def admin_batch_proxy(body: BatchProxyBody,
+                            x_admin_key: str | None = Header(default=None)):
+    """一键更改代理：把勾选账号统一绑定到指定代理（proxy_id 为空 = 恢复默认代理）。"""
+    _admin_auth(x_admin_key)
+    names = _clean_batch_names(body.names)
+    if not names:
+        raise HTTPException(400, "请先勾选账号")
+    if body.proxy_id and body.proxy_id not in {p["id"] for p in list_proxies()}:
+        raise HTTPException(400, "代理不存在")
+    busy = {acc["name"] for acc in pool.list_accounts() if acc.get("busy")}
+    updated: list[str] = []
+    failed: list[dict] = []
+    for name in names:
+        if name not in pool.accounts:
+            failed.append({"name": name, "error": "账号不存在"})
+            continue
+        if name in busy:
+            failed.append({"name": name, "error": "账号正在出片，未改动"})
+            continue
+        try:
+            set_account_proxy(name, body.proxy_id)
+            updated.append(name)
+        except Exception as exc:
+            failed.append({"name": name, "error": str(exc)[:150]})
+    return {"ok": True, "updated": updated, "failed": failed,
+            "proxy_id": body.proxy_id}
+
+
+@app.post("/api/admin/accounts/reset-quotas")
+async def admin_reset_quotas(x_admin_key: str | None = Header(default=None)):
+    """手动触发一次额度重置（与每天 LIMIT_RESET_HOUR 点自动重置同一套逻辑）。"""
+    _admin_auth(x_admin_key)
+    count = pool.reset_daily_quotas()
+    return {"ok": True, "reset": count, "next_reset_at": pool.next_quota_reset_at()}
+
+
+@app.post("/api/admin/accounts/{name}/test-generate")
+async def admin_test_generate(name: str, body: TestGenRequest,
+                              x_admin_key: str | None = Header(default=None)):
+    """账号级测试生成：用指定账号跑一条真实出片，返回 task_id（异步轮询结果）。"""
+    _admin_auth(x_admin_key)
+    _check_prompt_encoding(body.prompt)
+    if name not in pool.accounts:
+        raise HTTPException(404,'account not found')
+    if sites.site_for_model(body.model) != pool.site_of(name):
+        raise HTTPException(422,'模型与账号站点不一致')
+    execution_mode = work_reply.normalize_execution_mode(body.model, body.duration, body.execution_mode)
+    if execution_mode == 'force15':
+        error=force15_request_error(body.model,body.duration,body.video_count)
+        if error:raise HTTPException(422,error)
+    if body.reference_audio and execution_mode != 'force15':
+        raise HTTPException(422,'参考音频请使用强开15s模式')
+    count_error = work_reply.work_count_error(body.model, body.duration, execution_mode, body.video_count)
+    if count_error:
+        raise HTTPException(422, count_error)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    if JOBS.get(name, {}).get("status") == "running":
+        raise HTTPException(409, "该账号正在执行任务，稍后再试")
+    if pool.site_of(name) == sites.DOUBAO:
+        execution_mode = pool.execution_mode_for(name, execution_mode)
+    # 和客户 API 同一道时长检查：2.0-fast 网页只给 4～10 秒，直接请求 15 秒会被 dola 拒绝（2026-10-30 实测）
+    version = _model_version(body.model)
+    if execution_mode == "work":
+        error = work_reply.work_request_error(body.model, body.duration)
+        if error:
+            raise HTTPException(422, error)
+        if sites.site_for_model(body.model) != pool.site_of(name):
+            raise HTTPException(422, "模型与账号站点不一致；豆包账号请选择 doubao- 开头的模型")
+    if work_reply.uses_work_pair(body.model, body.duration, execution_mode):
+        raise HTTPException(422, "测试生成只用一个号，跑不了 30 秒拼接（要两个号各出 15 秒）")
+    if (version == "seedance-2.0" and not sites.is_doubao_model(body.model)
+            and execution_mode not in ("work", "force15") and body.duration not in config.V20_DURATIONS):
+        raise HTTPException(
+            422, f"{_public_model(version)} 仅支持 {'/'.join(map(str, config.V20_DURATIONS))} 秒视频"
+                 f"（收到 {body.duration} 秒）")
+    if not body.force:
+        warnings = pool.test_generate_warnings(name, body.model, body.duration, execution_mode=execution_mode)
+        if warnings:
+            # 前端认 TEST_GEN_WARN: 前缀，弹确认框列出原因，确认后带 force=true 重发
+            raise HTTPException(409, "TEST_GEN_WARN:" + "\n".join(warnings))
+    try:
+        images=await validate_reference_urls(body.reference_images)
+        audios=await reference_audio.validate(body.reference_audio)
+        images=await asyncio.to_thread(materialize_data_urls,images)
+        try:audios=await asyncio.to_thread(reference_audio.materialize,audios)
+        except BaseException:
+            cleanup_local_references([p for p in images if p not in body.reference_images]);raise
+    except ValueError as exc:raise HTTPException(422,str(exc)) from exc
+    task_id = "test_" + uuid.uuid4().hex
+    TEST_JOBS[task_id] = {
+        "account": name,
+        "prompt": body.prompt,
+        "model": body.model,
+        "duration": body.duration,
+        "ratio": body.ratio,
+        "execution_mode": execution_mode,
+        "video_count": body.video_count,
+        "status": "running",
+        "started_at": time.time(),
+        "result": None,
+        "error": "",
+    }
+    asyncio.create_task(_run_test_generate(
+        task_id, name, body.prompt, body.ratio, body.duration, body.model, execution_mode, body.video_count, images, audios))
+    return {"task_id": task_id, "account": name}
+
+
+async def _run_test_generate(task_id: str, name: str, prompt: str,
+                             ratio: str | None, duration: int, model: str, execution_mode="auto", video_count=1, reference_images=None, reference_audios=None) -> None:
+    reference_root=audio_root=None
+    trace=generation_trace.begin(task_id,name)
+    try:
+        # 测试生成同样消耗账号额度，因此写入正式任务库，便于在任务列表追踪结果。
+        store.create(task_id, model, prompt, ratio, duration, account=name, execution_mode=execution_mode, video_count=video_count,
+                     reference_images=json.dumps(reference_images or []), reference_audio=json.dumps(reference_audios or []))
+        started = time.time()
+        attempt = {"account": name, "attempt": 1, "started_at": started,
+                   "stage": "准备生成", "outcome": "running", "stages": []}
+        def save_attempt():
+            store.update(task_id, attempt_history=json.dumps([attempt], ensure_ascii=False))
+        store.update(task_id, status="processing", started_at=started,
+                     attempt_started_at=started, attempt=1,
+                     attempted_accounts=json.dumps([name]))
+        save_attempt()
+        def on_conversation_id(account, conversation_id, deadline_at):
+            attempt["conversation_id"] = conversation_id
+            save_attempt()
+            store.update(task_id, conversation_id=conversation_id, deadline_at=deadline_at,
+                         queue_note="已取得上游会话，正在查询视频结果", last_poll_at=time.time())
+        def on_poll(now, note=None, wait_seconds=None, progress=None):
+            fields = {"last_poll_at": now}
+            if progress:
+                generation_trace.progress(progress)
+                store.set_queue_note(task_id, progress)
+                if attempt["stage"] != progress:
+                    attempt["stage"] = redact_error(progress)[:240]
+                    attempt["stages"].append({"at": now, "stage": attempt["stage"]})
+                    attempt["stages"] = attempt["stages"][-240:]
+                    save_attempt()
+            if note:
+                fields["upstream_note"] = note
+            if wait_seconds:
+                fields["upstream_wait"] = int(wait_seconds)
+            store.update(task_id, **fields)
+
+        reference_root, image_paths=await download_reference_images(reference_images or [],task_id)
+        audio_root, audio_paths=await reference_audio.download(reference_audios or [],task_id)
+        if sum(Path(p).stat().st_size for p in image_paths+audio_paths)>config.REFERENCE_TOTAL_MAX_BYTES:
+            raise ValueError('参考素材总量超过限制')
+        thumbs=await asyncio.to_thread(save_reference_thumbnails,image_paths,task_id)
+        if thumbs:store.update(task_id,reference_thumbs=json.dumps(thumbs))
+        result = await pool.test_generate(name, prompt, ratio, duration, model, on_poll=on_poll,
+                                          on_conversation_id=on_conversation_id, execution_mode=execution_mode, video_count=video_count,
+                                          reference_image_paths=image_paths, reference_audio_paths=audio_paths)
+        TEST_JOBS[task_id]["result"] = result
+        if result.get("videos"):
+            result["videos"] = [{**item, "video_url": f"{config.PUBLIC_BASE}/videos/{Path(item['local_path']).name}"}
+                                for item in result["videos"]]
+        TEST_JOBS[task_id]["status"] = "done"
+        err = result.get("error", "") if not result.get("ok") else ""
+        attempt.update(outcome="completed" if result.get("ok") else "failed",
+                       error=redact_error(err), finished_at=time.time())
+        save_attempt()
+        TEST_JOBS[task_id]["error"] = err
+        if result.get("ok"):
+            # 下载交付也要补时长/分辨率/码率（以前只存地址，测试任务的这几列一直是空的）
+            fields = (await _completion_fields(task_id, result, duration, ratio)
+                      if result.get("delivery") == "link" or result.get("local_path")
+                      else {"video_url": result.get("video_url")})
+            store.update(task_id, status="completed",
+                         queue_note="",
+                         finished_at=time.time(), **fields)
+            if result.get("delivery") == "link":
+                TEST_JOBS[task_id]["result"] = {**result, "video_url": fields["video_url"]}
+        else:
+            status = "风控" if _is_risk_error(err) else "failed"
+            if result.get("local_path") or result.get("delivery") == "link":
+                fields = await _completion_fields(task_id, result, duration, ratio)
+                store.update(task_id, **fields)
+                if result.get("delivery") == "link":
+                    TEST_JOBS[task_id]["result"] = {**result, "video_url": fields["video_url"]}
+            store.update(task_id, status=status, queue_note="", error=failure_text.summarize(err),
+                         finished_at=time.time())
+            if result.get("recoverable"):
+                _maybe_start_recovery(task_id, TimeoutError(err))
+    except Exception as exc:
+        TEST_JOBS[task_id]["status"] = "failed"
+        TEST_JOBS[task_id]["error"] = failure_text.summarize(str(exc), limit=600)
+        try:
+            status = "风控" if _is_risk_error(str(exc)) else "failed"
+            store.update(task_id, status=status, queue_note="", error=failure_text.summarize(str(exc)),
+                         finished_at=time.time())
+        except Exception:
+            pass
+
+    finally:
+        for root in (reference_root,audio_root):
+            if root:shutil.rmtree(root,ignore_errors=True)
+        row=store.get(task_id) or {}
+        if trace:await trace.finish(row)
+        if row.get('status') in ('completed','failed','风控'):
+            cleanup_local_references((reference_images or [])+(reference_audios or []))
+            store.update(task_id,reference_images='[]',reference_audio='[]')
+
+
+def _is_risk_error(err: str) -> bool:
+    """仅当测试生成的失败原因是「登录态失效」时，才将任务状态标为「风控」。"""
+    return "登录态失效" in (err or "")
+
+
+@app.post("/api/admin/tasks/{task_id}/recover")
+async def admin_work_task_recover(task_id: str, x_admin_key: str | None = Header(default=None)):
+    """取回失败工作任务的原会话；不提交生成、不继续拼接任务。"""
+    _admin_auth(x_admin_key)
+    row = store.get(task_id)
+    if not row:
+        raise HTTPException(404, "task not found")
+    if row.get("status") == "completed":
+        return {"ok": True, "task_id": task_id, "recover_state": row.get("recover_state") or "completed"}
+    if (row.get("status") != "failed" or not _is_work_task(row) or _is_work_pair_task(row)
+            or not row.get("account") or not row.get("conversation_id")):
+        raise HTTPException(409, "仅支持有原会话的失败工作任务，拼接任务不支持手动取回")
+    if row.get("recover_state") == "watching" and float(row.get("recover_until") or 0) > time.time():
+        return {"ok": True, "task_id": task_id, "recover_state": "watching"}
+    if not _maybe_start_recovery(task_id, TimeoutError("工作模式原会话只读取回")):
+        raise HTTPException(409, "后台取回未启用")
+    return {"ok": True, "task_id": task_id, "recover_state": "watching"}
+
+
+@app.get("/api/admin/test-gen/{task_id}")
+async def admin_test_gen_status(task_id: str,
+                                x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    job = TEST_JOBS.get(task_id)
+    if not job:
+        raise HTTPException(404, "test task not found")
+    row = store.get(task_id) or {}
+    if row.get("recover_state") == "recovered" and row.get("status") == "completed":
+        job.update(status="done", error="", result={"ok": True, "account": row.get("account"),
+                   "conversation_id": row.get("conversation_id"), "video_url": row.get("video_url"),
+                   "recovered": True, "videos": _task_videos(row)})
+    return job
+
+
+@app.post("/api/admin/accounts/{name}/proxy")
+async def admin_account_proxy_set(name: str, body: AccountProxyBind,
+                                  x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    try:
+        set_account_proxy(name, body.proxy_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True}
+
+
+@app.get("/api/admin/route")
+async def admin_route(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return pool.preview_route()
+
+
+@app.post("/api/admin/accounts/{name}/prefer")
+async def admin_account_prefer(name: str, body: PreferBody,
+                               x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    pool.set_preferred(name if body.preferred else None)
+    return {"ok": True, "preferred": name if body.preferred else None}
+
+
+@app.post("/api/admin/accounts/{name}/weight")
+async def admin_account_weight(name: str, body: WeightBody,
+                               x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    pool.set_weight(name, body.weight)
+    return {"ok": True, "weight": body.weight}
+
+
+@app.post("/api/admin/accounts/rebalance-proxies")
+async def admin_rebalance_proxies(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        return pool.rebalance_proxy_bindings()
+    except Exception as exc:
+        code = getattr(exc, "code", "rebalance_failed")
+        raise HTTPException(400, f"{code}: {exc}") from exc
+
+
+@app.post("/api/admin/accounts/bind-proxies")
+async def admin_bind_proxies(body: BindProxiesBody,
+                             x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        return pool.bind_proxies(body.proxies, force=body.force, mode=body.mode)
+    except Exception as exc:
+        code = getattr(exc, "code", "bind_failed")
+        raise HTTPException(400, f"{code}: {exc}") from exc
+
+
+@app.post("/api/admin/accounts/export-cookies")
+async def admin_export_cookies(body: CookieExportBody,
+                               x_admin_key: str | None = Header(default=None)):
+    """Download saved cookies; never store an export in the public static directories."""
+    _admin_auth(x_admin_key)
+    names = list(dict.fromkeys(body.names))
+    if any(not NAME_RE.fullmatch(name) for name in names):
+        raise HTTPException(400, "账号名不合法")
+    if any(name not in pool.accounts for name in names):
+        raise HTTPException(404, "所选账号不存在，请刷新列表")
+    try:
+        content, media_type, filename, exported, failed = await asyncio.to_thread(
+            build_export, pool.accounts_dir, names, config.COOKIE_PROFILE_SUBDIR)
+    except CookieExportError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return Response(content=content, media_type=media_type, headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store, private", "Pragma": "no-cache",
+        "X-Content-Type-Options": "nosniff",
+        "X-Exported-Accounts": str(exported), "X-Failed-Accounts": str(failed),
+    })
+
+
+@app.post("/api/admin/accounts/import-cookies")
+async def admin_import_cookies(body: ImportTextBody,
+                               x_admin_key: str | None = Header(default=None)):
+    """Cookie 头文本 / Cookie JSON 批量导入（对齐 api-pool 的 import-cookies）。
+
+    text 形如：一行一个 Cookie 头，或浏览器扩展导出的 Cookie JSON 数组；自动跳过注释/空行/邮箱行，按 sessionid 去重。
+    """
+    _admin_auth(x_admin_key)
+    if not (body.text or "").strip():
+        raise HTTPException(400, "text 不能为空")
+    try:
+        result = await import_cookie_accounts_from_text(
+            pool, body.text, require_login=not body.skip_verify,
+            site="doubao" if (body.site or "").lower() == "doubao" else "dola",
+            proxy_ids=body.proxy_ids,
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc)[:300]) from exc
+    return {"ok": True, **result}
+
+
+@app.post("/api/admin/accounts/import-accounts")
+async def admin_import_accounts(body: ImportTextBody,
+                                x_admin_key: str | None = Header(default=None)):
+    """多行账号凭据批量登录导入（对齐 api-pool 的 server.login）。
+
+    支持 email----password----totp / | / , / : 及 JSON 数组；按 email 去重、自动命名 acc<N>，
+    按登录槽位并行走 Google OAuth，独立保存 profile。
+    """
+    _admin_auth(x_admin_key)
+    if not (body.text or "").strip():
+        raise HTTPException(400, "text 不能为空")
+    records = parse_account_text(body.text)
+    try:
+        selected_proxies = validate_proxy_ids(body.proxy_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if not records:
+        raise HTTPException(400, "未解析到有效账号（需 email----password 或 JSON 数组）")
+    # Reserve every job through the same path as single-account additions.
+    # That path validates duplicate emails/names and registers cancellable tasks
+    # before yielding, so simultaneous imports cannot allocate the same name.
+    pairs = allocate_credentials(records, set(pool.accounts) | set(JOBS), name_prefix="acc")
+    scheduled: list[tuple[str, asyncio.Task]] = []
+    failures: dict[str, str] = {}
+    assigned = 0
+    for name, cred in pairs:
+        try:
+            proxy_id = selected_proxies[assigned % len(selected_proxies)] if selected_proxies else None
+            request = AccountAdd(name=name, email=cred.email, password=cred.password,
+                                 totp=cred.totp, proxy_id=proxy_id,
+                                 recovery_email=cred.recovery_email or "", mail_api=cred.mail_api or "")
+            await admin_account_add(request, x_admin_key=x_admin_key)
+            scheduled.append((name, ADD_JOB_TASKS[name]))
+            assigned += 1
+        except Exception as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            failures[name] = redact_error(str(detail))[:150]
+    # Keep the existing response contract. Tasks also appear in /admin/jobs
+    # while this request waits, and client disconnects cannot cancel the batch.
+    if scheduled:
+        await asyncio.shield(asyncio.gather(*(task for _, task in scheduled), return_exceptions=True))
+    created, failed, errors = [], [], []
+    for name, _cred in pairs:
+        job = JOBS.get(name, {})
+        if name not in failures and job.get("status") == "success":
+            created.append(name)
+        else:
+            failed.append(name)
+            errors.append(f"{name}: {failures.get(name) or job.get('error') or '登录未完成或已取消'}")
+    return {"ok": True, "created": created, "failed": failed, "errors": errors}
+
+
+@app.get("/api/admin/proxies")
+async def admin_proxies(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return {"proxies": list_proxies(), "default_proxy": config.PROXY or ""}
+
+
+@app.post("/api/admin/proxies")
+async def admin_proxy_create(body: ProxyCreate,
+                             x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        created = create_proxy(
+            body.name, body.protocol, body.host, body.port,
+            body.username, body.password, body.remark,
+            mode=body.mode,
+            session_template=body.session_template,
+            sticky_ttl=body.sticky_ttl,
+            rotate_on_risk=body.rotate_on_risk,
+            rotate_min_interval=body.rotate_min_interval,
+            extract_url=body.extract_url,
+            extract_interval=body.extract_interval,
+            nodes_text=body.nodes_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"created": created}
+
+
+@app.patch("/api/admin/proxies/{proxy_id}")
+async def admin_proxy_update(proxy_id: str, body: ProxyUpdate,
+                             x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        updated = update_proxy(proxy_id, **fields)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not updated:
+        raise HTTPException(404, "proxy not found")
+    return {"updated": updated}
+
+
+@app.post("/api/admin/proxies/{proxy_id}/password")
+async def admin_proxy_password(proxy_id: str, response: Response,
+                               x_admin_key: str | None = Header(default=None)):
+    """Reveal one saved proxy password only on an explicit authenticated request."""
+    _admin_auth(x_admin_key)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    record = proxy_store.get_proxy(proxy_id)
+    if not record:
+        raise HTTPException(404, "proxy not found")
+    return {"password": record.get("password") or ""}
+
+
+@app.delete("/api/admin/proxies/{proxy_id}")
+async def admin_proxy_delete(proxy_id: str,
+                             x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    delete_proxy(proxy_id)
+    return {"ok": True}
+
+
+class BatchIds(BaseModel):
+    ids: list[str] = []
+
+
+@app.post("/api/admin/proxies/delete-batch")
+async def admin_proxy_delete_batch(body: BatchIds, x_admin_key: str | None = Header(default=None)):
+    """勾选多个代理一起删；已绑定这些代理的账号改回默认代理（与单个删除一致）。"""
+    _admin_auth(x_admin_key)
+    known = {p["id"] for p in list_proxies()}
+    deleted = []
+    for proxy_id in dict.fromkeys(body.ids):
+        if proxy_id in known:
+            delete_proxy(proxy_id)
+            deleted.append(proxy_id)
+    return {"ok": True, "deleted": deleted, "skipped": [i for i in body.ids if i not in deleted]}
+
+
+# ===== 动态代理：出口 IP 探测 / 轮换 =====
+
+
+def _region_probe_accounts(proxy_id: str, node_id: int | None = None) -> set[str]:
+    """Do not withdraw a route while a bound account has an active operation."""
+    sessions = proxy_store.sessions_snapshot()
+    names = {name for name, sess in sessions.items()
+             if sess.get('proxy_id') == proxy_id
+             and (node_id is None or sess.get('node_id') == node_id)}
+    if node_id is None:
+        conn = proxy_store._connect()
+        try:
+            names.update(row['account'] for row in conn.execute(
+                'SELECT account FROM account_proxy WHERE proxy_id=?',(proxy_id,)))
+        finally:conn.close()
+    return names
+
+
+async def _probe_region_route(proxy_id: str, node_id: int | None = None) -> dict:
+    names = _region_probe_accounts(proxy_id, node_id)
+    for name in names:
+        lock = pool._locks.get(name)
+        if (lock and lock.locked()) or JOBS.get(name, {}).get('status') == 'running':
+            return {'ok':False,'skipped':True,'error':'绑定账号正在运行任务，已跳过探测'}
+    async with AsyncExitStack() as stack:
+        for name in sorted(names):
+            await stack.enter_async_context(pool._use_account(name,'probing'))
+        if node_id is None:
+            return await asyncio.to_thread(proxy_store.probe_proxy_record,proxy_id)
+        return await asyncio.to_thread(proxy_store.probe_node_exit_ip,proxy_id,node_id)
+
+
+@app.post("/api/admin/proxies/{proxy_id}/probe")
+async def admin_proxy_probe(proxy_id: str,
+                            x_admin_key: str | None = Header(default=None)):
+    """探测该代理当前的出口 IP（动态代理用临时 session，不动已绑定的号）。"""
+    _admin_auth(x_admin_key)
+    try:
+        result = await _probe_region_route(proxy_id)
+    except Exception as exc:
+        return {"ok": False, "error": redact_error(exc)}
+    if result.get("error"):
+        result["error"] = redact_error(result["error"])
+    return result
+
+
+@app.post('/api/admin/proxies/{proxy_id}/nodes/{node_id}/probe')
+async def admin_proxy_node_probe(proxy_id: str, node_id: int,
+                                  x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        return await _probe_region_route(proxy_id,node_id)
+    except Exception as exc:
+        return {'ok':False,'error':redact_error(exc)}
+
+
+@app.get("/api/admin/proxies/{proxy_id}/nodes")
+async def admin_proxy_nodes(proxy_id: str,
+                            x_admin_key: str | None = Header(default=None)):
+    """提取型代理的节点池概览。"""
+    _admin_auth(x_admin_key)
+    nodes = proxy_store.list_nodes(proxy_id)
+    now = time.time()
+    return {
+        "nodes": nodes,
+        "total": len(nodes),
+        "alive": sum(1 for n in nodes if not n["dead"]),
+        "dead": sum(1 for n in nodes if n["dead"]),
+    }
+
+
+@app.post("/api/admin/proxies/{proxy_id}/nodes")
+async def admin_proxy_add_nodes(proxy_id: str, body: ProxyNodesIn,
+                                x_admin_key: str | None = Header(default=None)):
+    """手工往节点池里粘贴/追加节点（一行一个 host:port:user:pass）。"""
+    _admin_auth(x_admin_key)
+    result = await asyncio.to_thread(
+        proxy_store.add_nodes_from_text, proxy_id, body.text, body.ttl)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "添加节点失败"))
+    return result
+
+
+@app.post("/api/admin/proxies/{proxy_id}/refresh-nodes")
+async def admin_proxy_refresh_nodes(proxy_id: str,
+                                    x_admin_key: str | None = Header(default=None)):
+    """手动调一次提取接口补节点（注意：GenerateLink 类接口通常按次计费）。"""
+    _admin_auth(x_admin_key)
+    result = await asyncio.to_thread(proxy_store.fetch_extract_nodes, proxy_id)
+    return result
+
+
+@app.post("/api/admin/proxies/{proxy_id}/prune-nodes")
+async def admin_proxy_prune_nodes(proxy_id: str,
+                                  x_admin_key: str | None = Header(default=None)):
+    """清掉过期/连续失败的节点。"""
+    _admin_auth(x_admin_key)
+    return {"ok": True, "removed": proxy_store.prune_nodes(proxy_id)}
+
+
+@app.post("/api/admin/accounts/{name}/rotate-ip")
+async def admin_account_rotate_ip(name: str,
+                                  x_admin_key: str | None = Header(default=None)):
+    """给该号换一个出口 IP（动态代理换 sticky session；静态代理无操作）。"""
+    _admin_auth(x_admin_key)
+    # 注意：不要 to_thread。BrowserPool 的 sqlite 连接是跨线程共享的，
+    # 从 worker 线程调用池方法会和事件循环交错使用同一条连接、留下未结束的事务，
+    # 把 pool_usage.db 的写锁焊死（实测会让所有写操作 15s 超时 database is locked）。
+    result = pool.rotate_account_ip(name, force=True)
+    if not result.get("rotated"):
+        raise HTTPException(400, result.get("reason", "轮换失败"))
+    return result
+
+
+@app.post("/api/admin/accounts/{name}/probe-ip")
+async def admin_account_probe_ip(name: str,
+                                 x_admin_key: str | None = Header(default=None)):
+    """查该号当前真实出口 IP 与归属地。"""
+    _admin_auth(x_admin_key)
+    if name not in pool.accounts:
+        raise HTTPException(404, "account not found")
+    lock = pool._locks.setdefault(name, asyncio.Lock())
+    if lock.locked() or JOBS.get(name, {}).get("status") == "running":
+        return {"ok": False, "skipped": True, "error": "账号正在运行任务，已跳过出口探测"}
+    async with pool._use_account(name, "probing"):
+        try:
+            result = await asyncio.to_thread(proxy_store.probe_account_exit_ip, name)
+        except Exception as exc:
+            return {"ok": False, "error": redact_error(exc)}
+        if result.get("error"):
+            result["error"] = redact_error(result["error"])
+        return result
+
+
+@app.post("/api/admin/proxies/{proxy_id}/rotate")
+async def admin_proxy_rotate_all(proxy_id: str,
+                                 x_admin_key: str | None = Header(default=None)):
+    """给绑定在该代理上的所有号换出口 IP。"""
+    _admin_auth(x_admin_key)
+    return {"ok": True, **pool.rotate_proxy_accounts(proxy_id)}
+
+
+@app.get("/api/admin/users")
+async def admin_users(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    session = ADMIN_SESSIONS.get(x_admin_key or "", {})
+    return {
+        "users": user_list(),
+        "current_username": session.get("username"),
+    }
+
+
+@app.post("/api/admin/users")
+async def admin_user_create(body: AdminUserCreate,
+                            x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        created = user_create(
+            body.username, body.password, role=body.role,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"created": created}
+
+
+@app.patch("/api/admin/users/{username}")
+async def admin_user_update(username: str, body: AdminUserUpdate,
+                            x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        updated = user_update(
+            username,
+            new_username=body.username,
+            password=body.password,
+            enabled=body.enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if body.password or body.enabled is False or (body.username and body.username.strip() != username):
+        # 改了密码 / 改名 / 禁用：这个用户在别处的登录作废，正在操作的这一个留着
+        mine = ADMIN_SESSIONS.get(x_admin_key or "", {}).get("username") == username
+        keep = x_admin_key if mine and not (body.username and body.username.strip() != username) else None
+        user_store.drop_sessions(username, keep_token=keep)
+        for token, session in list(ADMIN_SESSIONS.items()):
+            if session.get("username") == username and token != keep:
+                ADMIN_SESSIONS.pop(token, None)
+    return {"updated": updated}
+
+
+class BatchUsers(BaseModel):
+    usernames: list[str] = []
+
+
+@app.post("/api/admin/users/delete-batch")
+async def admin_user_delete_batch(body: BatchUsers, x_admin_key: str | None = Header(default=None)):
+    """勾选多个管理员一起删：主管理员和当前登录的账号自动跳过。"""
+    _admin_auth(x_admin_key)
+    me = ADMIN_SESSIONS.get(x_admin_key or "", {}).get("username")
+    deleted, skipped = [], []
+    for username in dict.fromkeys(body.usernames):
+        if username == me:
+            skipped.append(f"{username}（当前登录）")
+            continue
+        try:
+            if not user_get(username):
+                skipped.append(f"{username}（不存在）")
+                continue
+            user_delete(username)
+            deleted.append(username)
+        except ValueError as exc:
+            skipped.append(f"{username}（{exc}）")
+    return {"ok": True, "deleted": deleted, "skipped": skipped}
+
+
+@app.delete("/api/admin/users/{username}")
+async def admin_user_delete(username: str,
+                            x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    session = ADMIN_SESSIONS.get(x_admin_key or "", {})
+    if session.get("username") == username:
+        raise HTTPException(400, "不能删除当前登录的账号")
+    try:
+        user_delete(username)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    user_store.drop_sessions(username)
+    return {"ok": True}
+
+
+def _add_job_stage(name: str, stage: str) -> None:
+    if name in JOBS:
+        JOBS[name] = {**JOBS[name], "stage": stage}
+
+
+async def _run_add_job(name: str, email: str, password: str, totp: str,
+                       cookies: str = "", cookie_skip_verify: bool = False,
+                       proxy_id: str | None = None, login_method: str = "google") -> None:
+    if name in DELETING_ACCOUNTS:
+        return
+    task = asyncio.current_task()
+    ADD_JOB_TASKS[name] = task
+    JOBS[name] = {"kind": "add", "status": "running", "email": email,
+                  "source": "cookie" if cookies else ("apple" if login_method == "apple" else "login"),
+                  "error": "", "started_at": time.time(), "stage": "排队中"}
+    try:
+        if ADD_ACCOUNT_SEM.locked():
+            _add_job_stage(name, f"排队中：已有 {ADD_ACCOUNT_SEM.active}/{ADD_ACCOUNT_SEM.limit} 个登录任务运行")
+        async with ADD_ACCOUNT_SEM:
+            slot_started = time.time()
+            JOBS[name] = {**JOBS[name], "login_started_at": slot_started,
+                          "queue_seconds": max(0, slot_started - JOBS[name]["started_at"])}
+            ADD_SEM_HOLDER["what"] = f"{name} 加号"
+            if cookies:
+                _add_job_stage(name, "导入 Cookie" + ("" if cookie_skip_verify else " 并在线验证登录态"))
+                result = await import_cookie_account(
+                    name, json.loads(cookies),
+                    require_login=not cookie_skip_verify,
+                    **({"proxy_id": proxy_id} if proxy_id else {}),
+                )
+                pool.ensure_account(name)
+                pool.set_email(name, email)
+                pool.set_source(name, "cookie")
+                pool.set_login_status(name, bool(result.get("verified")))
+            else:
+                if proxy_id:
+                    from proxy_navigation import await_proxy_thread
+                    await await_proxy_thread(bind_selected_proxy, name, proxy_id)
+                if login_method == "apple":
+                    def update(**fields):
+                        JOBS[name] = {**JOBS[name], **fields}
+                    control = AppleLoginControl(update)
+                    APPLE_LOGINS[name] = control
+                    await apple_login_flow(name, email, password, control)
+                    password = ""
+                else:
+                    _add_job_stage(name, "Google 登录中（打开浏览器走 OAuth，通常 1~3 分钟）")
+                    await add_account_flow(name, email, password, totp)
+                pool.ensure_account(name)
+                pool.set_email(name, email)
+                pool.set_source(name, "apple" if login_method == "apple" else "login")
+                pool.set_login_status(name, True)
+        JOBS[name] = {**JOBS[name], "status": "success", "stage": "", "finished_at": time.time()}
+    except asyncio.CancelledError:
+        JOBS[name] = {**JOBS[name], "status": "cancelling" if name in DELETING_ACCOUNTS else "failed", "stage": "取消并删除中" if name in DELETING_ACCOUNTS else "", "error": "已取消加号",
+                      "finished_at": time.time()}
+        raise
+    except Exception as e:
+        JOBS[name] = {**JOBS[name], "status": "failed", "stage": "", "error": redact_error(e)[:300],
+                      "finished_at": time.time()}
+    finally:
+        if name in JOBS and JOBS[name].get("login_started_at"):
+            job = JOBS[name]
+            JOBS[name] = {**job, "login_seconds": max(0, job.get("finished_at", time.time()) - job["login_started_at"])}
+        if control := APPLE_LOGINS.pop(name, None):
+            control.clear()
+        if ADD_JOB_TASKS.get(name) is task:
+            ADD_JOB_TASKS.pop(name, None)
+        if APPLE_ADD_TASKS.get(name) is task:
+            APPLE_ADD_TASKS.pop(name, None)
+        if ADD_SEM_HOLDER["what"] == f"{name} 加号":
+            ADD_SEM_HOLDER["what"] = ""
+
+
+async def _cred_try_refresh_once() -> None:
+    """发现有凭据但登录态失效的账号时，自动用存储的 Google 凭据重新登录刷新。"""
+    for name in cred_store.all_names():
+        now = time.time()
+        if name in DELETING_ACCOUNTS or (name in JOBS and JOBS[name].get("status") in ("running", "cancelling")):
+            continue
+        acct = next((a for a in pool.list_accounts() if a["name"] == name), None)
+        if not acct:
+            continue
+        # cookie 来源账号靠重新导入 cookie 管理，不用 Google 凭据自动重登，
+        # 否则会卡 Google OAuth 并占用浏览器 profile（导致验证 profile 锁）。
+        if acct.get("source") in ("cookie", "apple"):
+            continue
+        if acct.get("login_ok") in (1, None):
+            continue
+        if now - LAST_CRED_REFRESH.get(name, 0) < 180:
+            continue
+        creds = cred_store.load(name)
+        if not creds or not creds.get("email") or not creds.get("password"):
+            continue
+        # 重登要开这个号的浏览器 profile：必须持有账号锁，否则删除会和浏览器抢目录
+        # （2026-11-07 acc144：删到一半 Directory not empty，profile 只剩一部分）
+        if acct.get("busy") or acct.get("login_in_progress"):
+            continue
+        LAST_CRED_REFRESH[name] = now
+        print(f"[cred-refresh] 尝试自动刷新账号 {name}", flush=True)
+        try:
+            async with pool.login_recovery(name), ADD_ACCOUNT_SEM, pool._use_account(name, "verifying"):
+                if name not in pool.accounts:       # 排队期间号被删了
+                    continue
+                ADD_SEM_HOLDER["what"] = f"{name} 自动重登"
+                pool._phases[name] = "正在自动重新登录，等待最终结果"
+                await add_account_flow(
+                    name, creds["email"], creds["password"], creds.get("totp") or "",
+                    force_login=True)
+            pool.set_email(name, creds["email"])
+            pool.set_login_status(name, True)
+            print(f"[cred-refresh] {name} 刷新成功", flush=True)
+        except Exception as e:
+            print(f"[cred-refresh] {name} 刷新失败: {str(e)[:200]}", flush=True)
+        finally:
+            # OAuth may take longer than the cooldown itself. Measure the next
+            # allowed attempt from completion, so a timed-out login cannot
+            # monopolize a browser again on the very next background scan.
+            if name in pool.accounts and name not in DELETING_ACCOUNTS:
+                LAST_CRED_REFRESH[name] = time.time()
+            if ADD_SEM_HOLDER["what"] == f"{name} 自动重登":
+                ADD_SEM_HOLDER["what"] = ""
+
+
+async def _cred_refresher_loop() -> None:
+    while True:
+        try:
+            await _cred_try_refresh_once()
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
+@app.post("/api/admin/accounts", status_code=202)
+async def admin_account_add(body: AccountAdd, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    try:
+        validate_proxy_ids([body.proxy_id] if body.proxy_id else [])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if not NAME_RE.match(body.name):
+        raise HTTPException(400, "invalid account name")
+    if body.name in DELETING_ACCOUNTS:
+        raise HTTPException(409, "账号正在取消并删除，请等待清理完成")
+    if body.name in pool.accounts:
+        raise HTTPException(409, "账号名已存在：" + body.name)
+    if JOBS.get(body.name, {}).get("status") == "running":
+        raise HTTPException(409, "add job running")
+    email = (body.email or "").strip()
+    cookies = (body.cookies or "").strip()
+    if body.login_method == "apple":
+        if cookies:
+            raise HTTPException(400, "Apple 登录不能同时导入 Cookie")
+        if not email or not body.password:
+            raise HTTPException(400, "请填写 Apple 账号和密码")
+        if not body.proxy_id and not get_account_proxy(body.name):
+            raise HTTPException(400, "Apple 登录需要选择一个已启用的账号代理")
+    if not email and not cookies:
+        raise HTTPException(400, "邮箱不能为空")
+    if email:
+        dups = pool.find_accounts_by_email(email)
+        if dups:
+            raise HTTPException(409, "该邮箱已存在于账号 " + "、".join(dups) + "，请勿重复添加")
+        norm = email.lower()
+        for n, job in JOBS.items():
+            if (job.get("kind") == "add" and job.get("status") == "running"
+                    and (job.get("email") or "").strip().lower() == norm):
+                raise HTTPException(409, "该邮箱正在添加中（" + n + "），请勿重复提交")
+    if cookies:
+        try:
+            json.loads(cookies)
+        except Exception:
+            raise HTTPException(422, "cookie JSON 格式错误")
+    if email and body.login_method != "apple":
+        cred_store.store(body.name, email, body.password, body.totp,
+                         recovery_email=body.recovery_email or None, mail_api=body.mail_api or None)
+    JOBS[body.name] = {"kind": "add", "status": "running", "email": email,
+                       "source": "cookie" if cookies else ("apple" if body.login_method == "apple" else "login"),
+                       "error": "", "started_at": time.time(), "stage": "排队中"}
+    kwargs = {"login_method": "apple"} if body.login_method == "apple" else {}
+    task = asyncio.create_task(_run_add_job(
+        body.name, email, body.password, body.totp,
+        cookies=cookies, cookie_skip_verify=body.cookie_skip_verify,
+        proxy_id=body.proxy_id,
+        **kwargs,
+    ))
+    ADD_JOB_TASKS[body.name] = task
+    if body.login_method == "apple":
+        APPLE_ADD_TASKS[body.name] = task
+    return {"ok": True, "job": "running"}
+
+
+@app.get("/api/admin/jobs")
+async def admin_jobs(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return {"jobs": JOBS}
+
+
+@app.post("/api/admin/jobs/{name}/apple-answer")
+async def admin_apple_answer(name: str, body: AppleLoginAnswer,
+                             x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    control = APPLE_LOGINS.get(name)
+    if not control or JOBS.get(name, {}).get("status") != "running":
+        raise HTTPException(409, "Apple 登录已结束，请刷新账号列表")
+    try:
+        control.submit(body.challenge_id, body.code)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return Response(content='{"ok":true}', media_type="application/json",
+                    headers={"Cache-Control": "no-store, private"})
+
+
+@app.post("/api/admin/jobs/{name}/apple-cancel")
+async def admin_apple_cancel(name: str, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    task = APPLE_ADD_TASKS.get(name)
+    if not task or task.done():
+        raise HTTPException(409, "Apple 登录已结束，请刷新账号列表")
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    # 排队中的协程可能尚未开始执行，补齐取消状态。
+    JOBS[name] = {**JOBS[name], "status": "failed", "stage": "", "challenge": None,
+                  "error": "已取消 Apple 登录", "finished_at": time.time()}
+    APPLE_ADD_TASKS.pop(name, None)
+    return {"ok": True}
+
+
+def _failed_add_job(name: str, *, allow_incomplete: bool = False) -> dict:
+    job = JOBS.get(name) or {}
+    if job.get("kind") != "add" or job.get("status") != "failed":
+        raise HTTPException(409, "只能处理加号失败的记录")
+    if name in pool.accounts:
+        from retry_state import is_incomplete_account
+        account = next((a for a in pool.list_accounts() if a["name"] == name), None)
+        if not allow_incomplete or not is_incomplete_account(account):
+            raise HTTPException(409, "这个账号已经在号池里，请在账号列表里操作")
+    return job
+
+
+@app.post("/api/admin/jobs/{name}/retry", status_code=202)
+async def admin_add_job_retry(name: str, x_admin_key: str | None = Header(default=None)):
+    """加号失败后用当初保存的邮箱 / 密码重新登录一次（代理绑定沿用）。Cookie 导入的不保存 Cookie，不能重试。"""
+    _admin_auth(x_admin_key)
+    if name in DELETING_ACCOUNTS:
+        raise HTTPException(409, "账号正在取消并删除，请等待清理完成")
+    job = _failed_add_job(name, allow_incomplete=True)
+    cred = cred_store.load(name) if job.get("source") == "login" else None
+    if not cred or not cred.get("email"):
+        raise HTTPException(409, "没有保存这个号的登录凭据（Cookie 导入的号请删除后重新导入）")
+    JOBS[name] = {"kind": "add", "status": "running", "email": cred["email"], "source": "login",
+                  "error": "", "started_at": time.time(), "stage": "排队中（重试）"}
+    ADD_JOB_TASKS[name] = asyncio.create_task(_run_add_job(name, cred["email"], cred.get("password") or "", cred.get("totp") or ""))
+    return {"ok": True, "job": "running"}
+
+
+@app.delete("/api/admin/jobs/{name}")
+async def admin_add_job_delete(name: str, x_admin_key: str | None = Header(default=None)):
+    """Cancel queued/running adds before clearing their complete local state."""
+    _admin_auth(x_admin_key)
+    job = JOBS.get(name) or {}
+    if job.get('kind') != 'add' or job.get('status') not in ('running', 'cancelling', 'failed'):
+        raise HTTPException(404, "加号记录不存在，请刷新列表")
+    if job.get('status') == 'failed':
+        _failed_add_job(name, allow_incomplete=True)
+    return await _request_account_delete(name)
+
+
+async def _request_account_delete(name: str) -> dict:
+    if not NAME_RE.fullmatch(name):
+        raise HTTPException(400, "invalid account name")
+    worker = ACCOUNT_DELETE_TASKS.get(name)
+    if worker is None:
+        job = JOBS.get(name) or {}
+        if name not in pool.accounts and job.get('kind') != 'add':
+            raise HTTPException(404, "account not found")
+        if job.get('kind') == 'add' and job.get('status') in ('running', 'cancelling'):
+            task = ADD_JOB_TASKS.get(name)
+            if task is None:
+                raise HTTPException(409, "加号任务句柄尚未就绪，请稍后重试")
+        from retry_state import is_incomplete_account
+        account = next((a for a in pool.list_accounts() if a['name'] == name), None)
+        retire_add_route = job.get('kind') == 'add' and (
+            job.get('status') in ('running', 'cancelling') or
+            name not in pool.accounts or is_incomplete_account(account))
+        lock = pool._locks.get(name)
+        if lock and lock.locked() and not (job.get('kind') == 'add' and job.get('status') in ('running','cancelling')):
+            raise HTTPException(409, '账号正在使用中，请稍后删除')
+        ACCOUNT_DELETE_ERRORS.pop(name, None)
+        DELETING_ACCOUNTS.add(name)
+        if job.get('kind') == 'add':
+            JOBS[name] = {**job, 'status': 'cancelling', 'stage': '取消并删除中'}
+        worker = asyncio.create_task(_delete_account_worker(name, retire_add_route))
+        ACCOUNT_DELETE_TASKS[name] = worker
+        # Retrieve failures even after the HTTP request has returned 202-style state.
+        worker.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+    # Acknowledge scheduling immediately; cleanup owns its own task and error state.
+    return {'ok': True, 'deleting': True}
+
+
+async def _delete_account_worker(name: str, retire_add_route: bool = False) -> dict:
+    try:
+        task = ADD_JOB_TASKS.get(name)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if ADD_JOB_TASKS.get(name) is task:
+            ADD_JOB_TASKS.pop(name, None)
+        if APPLE_ADD_TASKS.get(name) is task:
+            APPLE_ADD_TASKS.pop(name, None)
+        # The login context and any mutating proxy threads have now finished.
+        # Keep generation/probe locks enforced by BrowserPool.delete_account.
+        lock = pool._locks.get(name)
+        if lock and lock.locked():
+            raise HTTPException(409, '账号正在使用中，请稍后删除')
+        if retire_add_route:
+            proxy_store.discard_cancelled_add_route(name)
+        pool.delete_account(name)
+        cred_store.delete(name)
+        JOBS.pop(name, None)
+        LAST_CRED_REFRESH.pop(name, None)
+        ACCOUNT_DELETE_ERRORS.pop(name, None)
+        return {'ok': True, 'deleting': False}
+    except Exception as exc:
+        ACCOUNT_DELETE_ERRORS[name] = {'error': redact_error(getattr(exc,'detail',None) or exc)[:250], 'at': time.time()}
+        while len(ACCOUNT_DELETE_ERRORS) > 200:
+            ACCOUNT_DELETE_ERRORS.pop(next(iter(ACCOUNT_DELETE_ERRORS)))
+        if (JOBS.get(name) or {}).get('kind') == 'add':
+            JOBS[name] = {**JOBS[name], 'status': 'failed', 'stage': '',
+                          'error': '删除失败：' + redact_error(exc)[:250], 'finished_at': time.time()}
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(409, redact_error(exc)) from exc
+    finally:
+        DELETING_ACCOUNTS.discard(name)
+        ACCOUNT_DELETE_TASKS.pop(name, None)
+
+
+class ConcurrencySettings(BaseModel):
+    max_concurrency: int = Field(..., ge=0, le=1000, strict=True)
+
+
+def _concurrency_settings():
+    return {
+        "max_concurrency": pool.max_concurrency,
+        "active": pool.semaphore.active,
+        "waiting": pool.semaphore.waiting,
+        "environment_default": max(0, config.MAX_CONCURRENCY),
+    }
+
+
+@app.get("/api/admin/settings/concurrency")
+async def admin_get_concurrency(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    return _concurrency_settings()
+
+
+@app.patch("/api/admin/settings/concurrency")
+async def admin_set_concurrency(body: ConcurrencySettings,
+                                x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    # Persist first. A failed write must not silently change the live limit.
+    # No await between persistence and application: requests see one consistent value.
+    store.set_global_concurrency(body.max_concurrency)
+    pool.set_max_concurrency(body.max_concurrency)
+    return _concurrency_settings()
+
+
+@app.get("/api/admin/tasks")
+async def admin_tasks(limit: int = 50, q: str = "", offset: int = 0,
+                      x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    limit = min(max(limit, 1), 200)
+    page = store.task_page(q, limit, offset)
+    tasks = page["tasks"]
+    for t in tasks:
+        # 任务列表显示实际账号所属站点。历史任务里模型名可能仍是 seedance-*，
+        # 仅看模型前缀会把豆包 Cookie 任务误标成 dola。
+        account = str(t.get("account") or "").strip()
+        if account:
+            try:
+                task_site = pool.site_of(account)
+            except Exception:
+                task_site = ""
+        else:
+            task_site = ""
+        t["site"] = task_site if task_site in (sites.DOLA, sites.DOUBAO) else sites.site_for_model(t.get("model"))
+        t.pop("video_model", None)   # 续签用的上游元数据，面板用不到且体积大
+        t.pop("upscale_job", None)
+        t["upscale_public_url"] = _upscale_public_url(t)
+        # 排队中 / 生成中的任务带上预计耗时（与客户接口的 progress 同一口径：
+        # 同时长近 3 天已完成任务的平均生成耗时，样本不足用兜底表）
+        if t.get("status") in ("queued", "processing"):
+            t["progress"] = _progress_payload(status=t["status"], created_at=t.get("created_at"),
+                                              duration=t.get("duration"))
+    # 服务器当前时间：面板用它校正浏览器时钟偏差，实时计时才准
+    return {**page, "tasks": tasks, "now": time.time()}
+
+
+@app.get("/api/admin/videos")
+async def admin_videos(limit: int = 100, q: str = "", x_admin_key: str | None = Header(default=None)):
+    """视频管理：已完成任务的列表 + 文件元数据（老任务按需从磁盘补大小）。q：搜索整个历史。"""
+    _admin_auth(x_admin_key)
+    limit = min(max(limit, 1), 500)
+    rows = (store.search_tasks(q, limit, status="completed") if q.strip()
+            else store.recent_tasks(limit))
+    out = []
+    for r in rows:
+        if r.get("status") != "completed":
+            continue
+        item = dict(r)
+        if item.get("video_url"):
+            local = Path(config.DOWNLOAD_DIR) / Path(item["video_url"]).name
+        else:
+            local = None
+        item.pop("video_model", None)
+        item.pop("upscale_job", None)
+        item["upscale_public_url"] = _upscale_public_url(item)
+        if item.get("video_link"):
+            item["file_exists"] = True
+            item["file_size"] = item.get("video_size")
+            item["delivery"] = "link"
+        elif local and local.exists():
+            item["file_exists"] = True
+            try:
+                item["file_size"] = os.path.getsize(local)
+            except OSError:
+                item["file_size"] = item.get("video_size")
+            if not item.get("video_size"):
+                item["video_size"] = item["file_size"]
+        else:
+            item["file_exists"] = False
+        out.append(item)
+    out.sort(key=lambda x: x.get("created_at") or 0, reverse=True)
+    stats = store.video_stats()
+    return {
+        "videos": out,
+        "total": stats["total"],
+        "available": stats["available"],
+    }
+
+
+def _delete_task_files_and_record(row: dict) -> None:
+    """删一条任务：视频文件 + 参考图缩略图 + 任务记录。"""
+    urls = [row.get("video_url")] + [item["video_url"] for item in _task_videos(row)]
+    for url in set(filter(None, urls)):
+        local = Path(config.DOWNLOAD_DIR) / Path(url).name
+        try:
+            if local.exists():
+                local.unlink()
+        except OSError:
+            pass
+    if row.get("upscale_file"):
+        try:
+            (Path(config.DOWNLOAD_DIR) / Path(row["upscale_file"]).name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    delete_reference_thumbnails(_task_reference_thumbs(row.get("reference_thumbs")))
+    store.delete_task(row["id"])
+
+
+@app.delete("/api/admin/videos/{task_id}")
+async def admin_video_delete(task_id: str, x_admin_key: str | None = Header(default=None)):
+    """删除视频文件并同步删除对应的任务记录。"""
+    _admin_auth(x_admin_key)
+    row = store.get(task_id)
+    if not row or row.get("status") != "completed":
+        raise HTTPException(404, "task not found")
+    _delete_task_files_and_record(row)
+    return {"ok": True, "deleted": task_id}
+
+
+@app.post("/api/admin/tasks/delete-batch")
+async def admin_task_delete_batch(body: BatchIds, x_admin_key: str | None = Header(default=None)):
+    """勾选多条任务一起删（连同视频文件）。排队中 / 生成中的跳过：还在跑，删了上游照样扣点、出片没处放。"""
+    _admin_auth(x_admin_key)
+    deleted, skipped = [], []
+    for task_id in dict.fromkeys(body.ids):
+        row = store.get(task_id)
+        if not row:
+            skipped.append(f"{task_id}（不存在）")
+        elif row.get("status") in ("queued", "processing") or task_id in RESUMING or task_id in RECOVERING:
+            skipped.append(f"{task_id}（还在排队/生成中）")
+        else:
+            _delete_task_files_and_record(row)
+            deleted.append(task_id)
+    return {"ok": True, "deleted": deleted, "skipped": skipped}
+
+
+@app.get("/api/admin/stats")
+async def admin_stats(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    st = store.stats()
+    accs = pool.list_accounts(processing_accounts=store.busy_account_ids())
+    sched = [a for a in accs if a["scheduling"] and not a["cooling"]]
+    st["total_accounts"] = len(accs)
+    st["available_accounts"] = sum(1 for a in sched if a["remaining"] > 0)
+    # 剩余「点数」只算 dola 号：豆包号不报剩余，本地上限只是兜底（默认 999），加进来会把总数撑爆
+    st["total_remaining"] = sum(a["remaining"] for a in sched if a.get("site") != "doubao")
+    totals = st.pop("per_account_total", {})
+    st["per_account"] = [{**a, "completed_total": totals.get(a["name"], 0)} for a in accs]
+    st.update(_group_summary(accs, JOBS))
+    return st
+
+
+@app.get("/api/admin/keys")
+async def admin_keys(x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    keys = []
+    for key in store.list_keys():
+        usage = store.key_usage(store.hash_api_key(key["key"]))
+        keys.append({**key, **{
+            "today_total": usage["total"],
+            "today_completed": usage["completed"],
+            "today_failed": usage["failed"],
+            "today_active": usage["active"],
+            "today_queued": usage["queued"],
+        }})
+    return {
+        "keys": keys,
+        "env_keys": len(config.API_KEYS),
+        # 面板的「允许时长」勾选项必须跟着 NATIVE_DURATION_MAX 走：前端原先硬编码
+        # 5/10/15/30，开了任意时长也勾不到新档位，等于功能从面板上用不了。
+        "supported_durations": config.all_durations(),
+    }
+
+
+@app.post("/api/admin/keys")
+async def admin_key_create(body: KeyCreate, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    allowed = _normalize_allowed_durations(body.allowed_durations)
+    return {"created": store.create_key(
+        body.name,
+        daily_limit=body.daily_limit,
+        concurrency_limit=body.concurrency_limit,
+        allowed_durations=allowed,
+        expires_at=body.expires_at,
+    )}
+
+
+@app.patch("/api/admin/keys/{key}")
+async def admin_key_patch(key: str, body: KeyPatch,
+                          x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    if not store.get_key(key):
+        raise HTTPException(404, "api key not found")
+    fields = {}
+    if body.name is not None:
+        fields["name"] = body.name
+    if body.enabled is not None:
+        fields["enabled"] = 1 if body.enabled else 0
+    if body.daily_limit is not None:
+        fields["daily_limit"] = body.daily_limit
+    if body.concurrency_limit is not None:
+        fields["concurrency_limit"] = body.concurrency_limit
+    if body.allowed_durations is not None:
+        fields["allowed_durations"] = _normalize_allowed_durations(body.allowed_durations)
+    if body.expires_at is not None:
+        fields["expires_at"] = body.expires_at
+    store.update_key(key, **fields)
+    return {"ok": True}
+
+
+@app.post("/api/admin/keys/delete-batch")
+async def admin_key_delete_batch(body: BatchIds, x_admin_key: str | None = Header(default=None)):
+    """勾选多个 API 密钥一起删（调用方立即失效）；环境变量里的 key 不在列表里，删不到。"""
+    _admin_auth(x_admin_key)
+    deleted, skipped = [], []
+    for key in dict.fromkeys(body.ids):
+        if store.get_key(key):
+            store.delete_key(key)
+            deleted.append(key)
+        else:
+            skipped.append(key[:8] + "…（不存在）")
+    return {"ok": True, "deleted": deleted, "skipped": skipped}
+
+
+@app.delete("/api/admin/keys/{key}")
+async def admin_key_delete(key: str, x_admin_key: str | None = Header(default=None)):
+    _admin_auth(x_admin_key)
+    if not store.get_key(key):
+        raise HTTPException(404, "api key not found")
+    store.delete_key(key)
+    return {"ok": True}
+
+
+# 面板单文件前端（放最后，保证上面的路由优先）
+app.mount("/", StaticFiles(directory="web", html=True), name="web")

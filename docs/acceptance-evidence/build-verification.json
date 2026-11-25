@@ -1,0 +1,6 @@
+{
+  "frontendScriptsParse": 19,
+  "healthPublicFieldsOnly": true,
+  "healthOk": true,
+  "noSecretFields": true
+}

@@ -1,0 +1,7 @@
+[Unit]
+Description=Dola Studio health watchdog
+After=dola-studio.service
+
+[Service]
+Type=oneshot
+ExecStart=/www/wwwroot/dola-studio/healthcheck.sh

@@ -1,0 +1,17 @@
+{
+  "deployed": true,
+  "backup": "/opt/dola-pool/backups/studio-system-fonts-20261125-070645",
+  "serviceRestarted": false,
+  "healthOk": true,
+  "thirdPartyCodeNoticesPreserved": true,
+  "originalLicensePreserved": true,
+  "fontAssetsRemoved": 15,
+  "files": {
+    "web/index.html": "ffcda353b1c026fcc86d3895bbbe87dabb291ab35d77a8058c18290be198b96e",
+    "web/shell.css": "bae349bc6b6783487353dc35ebfdc4f626553aceda1e36e3ef68edaee446c2fe",
+    "web/console.css": "f876c515687b04d7a34d17902247e3c4e6b70621996026266c89314ef71a7aef",
+    "THIRD_PARTY_NOTICES.md": "a1722f7265ac026b38ea7d9e70ad999c92e29e2dfb47ea4c1ae60d8c2ebfde88",
+    "docs/ATTRIBUTION-INVENTORY.md": "3e82c02aa4d7a81ab19540cace84a595bdc957463162670b0046de8a26350292",
+    "docs/TYPOGRAPHY.md": "47f67c34fcb54467b4555cc58ce86718fbdcd163d6cde1e4f9576f350904f689"
+  }
+}

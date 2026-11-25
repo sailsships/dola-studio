@@ -1,0 +1,25 @@
+{
+  "build": "20261125-live-audit-1",
+  "format": "classic-script",
+  "order": [
+    "app/request-client.js",
+    "app/refresh-engine.71c9bbf1c395.js",
+    "app/runtime.233eaa892e34.js",
+    "app/settings.js",
+    "app/releases.js",
+    "app/duration.js",
+    "app/responder.js",
+    "app/upscale.js",
+    "app/dashboard.js",
+    "app/accounts.dc44505c44a7.js",
+    "app/proxies.js",
+    "app/selection.js",
+    "app/credentials.js",
+    "app/tasks.js",
+    "app/videos.js",
+    "app/api-keys.js",
+    "app/diagnostics.js",
+    "app/creation.js",
+    "app/boot.5d8bc51e2c4e.js"
+  ]
+}

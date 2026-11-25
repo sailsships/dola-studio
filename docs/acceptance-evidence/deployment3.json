@@ -1,0 +1,15 @@
+{
+  "deployed": true,
+  "backup": "/opt/dola-pool/backups/studio-live-completion-20261125-020948",
+  "healthOk": true,
+  "files": {
+    "server.py": "5432873b7d6a2e9a2569a34613188c7127f912903e31a86cf90fb03cbefaddcd",
+    "user_store.py": "e81da25464d129728fcb0b429d28566d8546c58a746e055ca8f2db0e6b61b6a3",
+    "force15_worker.py": "a980dc5df63ea8bd25b4b37cff3b771687acc9670747f9d4e47169339d444541",
+    "web/index.html": "41035c98b0aec49a12853fa37479a6f2ddba6c6ee1004072319e4bb6cb6e339f",
+    "web/app/manifest.json": "e13b8bdd5df79d06c366df4fac51a5e5cdeb9e335b4986720d319bd19c6bc7cf",
+    "web/app/runtime.233eaa892e34.js": "fb26485e90deaa7702868c916fabb72caa3c366fff85ac63970f7ce47d72d01a"
+  },
+  "originalLicensePreserved": true,
+  "idleAtRestart": true
+}

@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "pythonBehaviorAstUnchanged": [
+    "protocol/dola_pure_api.py",
+    "tests/test_cookie_nondestructive.py",
+    "tests/test_native_duration.py",
+    "tests/test_pair_confirm_native.py"
+  ],
+  "deploymentNamesConsistent": true,
+  "timerTargetPresent": true,
+  "centralThirdPartyNoticesPreserved": true,
+  "originalLicensePreserved": true
+}

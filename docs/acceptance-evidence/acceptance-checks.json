@@ -1,0 +1,128 @@
+{
+  "checks": [
+    {
+      "name": "real-login-and-invalid-password",
+      "passed": true,
+      "actualLoginApi": true
+    },
+    {
+      "name": "seven-navigation-panels-real-data",
+      "passed": true,
+      "panels": 7,
+      "health": true
+    },
+    {
+      "name": "create-edit-toggle-customer-key-real-store",
+      "passed": true,
+      "persistedAfterReload": true,
+      "disabledAuth": 401,
+      "enabledMissingTask": 404
+    },
+    {
+      "name": "api-debug-real-network-template-export-import",
+      "passed": true,
+      "models": 200,
+      "query": 404,
+      "unconfirmedGenerationBlocked": true,
+      "keyExcludedFromExports": true
+    },
+    {
+      "name": "proxy-crud-password-read-and-preserve",
+      "passed": true,
+      "boundProductionAccounts": 0,
+      "passwordPreserved": true
+    },
+    {
+      "name": "account-note-real-write-reload-restore",
+      "passed": true,
+      "realPersistedAndRestored": true
+    },
+    {
+      "name": "global-window-concurrency-real-roundtrip",
+      "passed": true,
+      "restored": true,
+      "invalidValuesBlocked": true
+    },
+    {
+      "name": "upscale-real-enable-display-disable-server-gate",
+      "passed": true,
+      "realSettingRoundtrip": true,
+      "disabledGate": 409,
+      "providerRequests": 0
+    },
+    {
+      "name": "responder-real-config-save-and-unconfigured-error",
+      "passed": true,
+      "configPreserved": true,
+      "externalProviderVerified": false
+    },
+    {
+      "name": "version-status-and-manual-check",
+      "passed": true,
+      "noUpstreamInstall": true
+    },
+    {
+      "name": "password-change-only-disposable-admin-real-login",
+      "passed": true,
+      "productionAdminUnchanged": true,
+      "oldPasswordRejected": true,
+      "newPasswordLogin": true
+    },
+    {
+      "name": "delete-only-audit-key-and-proxy-via-buttons",
+      "passed": true,
+      "onlyAuditResourcesDeleted": true,
+      "keyRevoked": 401
+    },
+    {
+      "name": "historical-video-actual-playback-and-range",
+      "passed": true,
+      "duration": 15.104,
+      "width": 1280,
+      "height": 720,
+      "streamHttp": 206,
+      "playingConfirmed": true
+    },
+    {
+      "name": "upscale-off-hidden-in-real-tables",
+      "passed": true,
+      "tasksAndVideosHidden": true
+    },
+    {
+      "name": "logout-clears-connection-secret",
+      "passed": true,
+      "loggedOut": true,
+      "apiKeyCleared": true
+    },
+    {
+      "name": "task-pagination-search-prompt-close",
+      "passed": true,
+      "pageSize": 50,
+      "nextAndFirst": true,
+      "searchExactTask": true
+    },
+    {
+      "name": "background-refresh-preserves-open-menu-and-input",
+      "passed": true,
+      "actualRefreshHttp": 200,
+      "automaticRefreshWaitSeconds": 12,
+      "sameFilterNode": true,
+      "menuRemainedOpen": true
+    },
+    {
+      "name": "logout-server-revocation",
+      "passed": true,
+      "actualLogin": true,
+      "logoutHttp": 200,
+      "oldTokenRejected": 401,
+      "otherSessionPreserved": 200,
+      "reloginAfterReload": true,
+      "apiSecretCleared": true,
+      "errors": [],
+      "mockedRequests": 0
+    }
+  ],
+  "realNetwork": true,
+  "mockedRequests": 0,
+  "generationIsSeparate": true
+}

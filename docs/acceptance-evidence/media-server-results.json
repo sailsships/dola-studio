@@ -1,0 +1,58 @@
+{
+  "passed": true,
+  "distinctFiles": true,
+  "results": [
+    {
+      "taskId": "test_e7872758717a42228e754e8035d7e115",
+      "status": "completed",
+      "sha256": "a78324296ab0c14c7a252c469772a74abe70452ca053923c3a99a6e61d372fd9",
+      "metadata": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "codec_type": "video",
+            "width": 1280,
+            "height": 720,
+            "pix_fmt": "yuv420p"
+          },
+          {
+            "codec_name": "aac",
+            "codec_type": "audio"
+          }
+        ],
+        "format": {
+          "duration": "15.104000",
+          "size": "7561310"
+        }
+      }
+    },
+    {
+      "taskId": "test_59b876deca2049f284fffa1c6326487a",
+      "status": "completed",
+      "sha256": "be9ef1da40b930c5f73a0bcff69197a2c77f9eba0e3139383de3c34bf65a7598",
+      "metadata": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "h264",
+            "codec_type": "video",
+            "width": 1280,
+            "height": 720,
+            "pix_fmt": "yuv420p"
+          },
+          {
+            "codec_name": "aac",
+            "codec_type": "audio"
+          }
+        ],
+        "format": {
+          "duration": "15.104000",
+          "size": "8493169"
+        }
+      }
+    }
+  ]
+}

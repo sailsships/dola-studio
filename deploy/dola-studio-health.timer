@@ -1,0 +1,10 @@
+[Unit]
+Description=Dola Studio periodic health check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=dola-studio-health.service
+
+[Install]
+WantedBy=timers.target

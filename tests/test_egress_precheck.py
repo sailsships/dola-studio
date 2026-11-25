@@ -1,0 +1,178 @@
+"""A dead sticky exit is detected before dispatch, rotated once, and skipped if still dead."""
+import time
+import pytest
+
+from test_task_deadline import _pool, _run
+
+
+def _setup(tmp_path, monkeypatch, names, alive_by_call, rotated=True):
+    module, bp = _pool(tmp_path, monkeypatch, names)
+    monkeypatch.setattr(module.config, "EGRESS_PRECHECK", True)
+    monkeypatch.setattr(module.config, "EGRESS_AUTO_ROTATE_GAP", 120)
+    bp._has_bound_proxy = lambda name: True
+    checks, rotations = [], []
+    def alive(name):
+        checks.append(name)
+        return {"ok": alive_by_call(name, len([c for c in checks if c == name])), "detail": "ProxyError"}
+    monkeypatch.setattr(module, "egress_alive", alive)
+    def rotate(name, reason="", force=False):
+        rotations.append(name)
+        return {"rotated": rotated}
+    bp.rotate_account_ip = rotate
+    calls = []
+    async def generate(account, *a, **kw):
+        calls.append(account)
+        return {"account": account, "local_path": "fake.mp4"}
+    bp._generate_effective = generate
+    return bp, checks, rotations, calls
+
+
+def test_dead_exit_is_rotated_and_the_same_account_is_used(tmp_path, monkeypatch):
+    # first check fails, the check after rotation passes
+    bp, checks, rotations, calls = _setup(tmp_path, monkeypatch, ("acc1",), lambda name, n: n >= 2)
+    notes = []
+    result = _run(bp.generate_video("p", None, 5, "seedance-2.5", deadline=time.time() + 30, on_wait=notes.append))
+    assert result["account"] == "acc1" and calls == ["acc1"]
+    assert rotations == ["acc1"] and checks == ["acc1", "acc1"]
+    assert any("已自动换 IP" in n for n in notes)
+
+
+def test_still_dead_after_rotation_skips_without_risk(tmp_path, monkeypatch):
+    bp, checks, rotations, calls = _setup(tmp_path, monkeypatch, ("acc1", "acc2"),
+                                          lambda name, n: name == "acc2")
+    bp._ordered_candidates = lambda groups: sorted(bp.list_accounts(), key=lambda a: a["name"])
+    result = _run(bp.generate_video("p", None, 5, "seedance-2.5", deadline=time.time() + 30))
+    assert result["account"] == "acc2" and calls == ["acc2"]
+    assert rotations == ["acc1"]
+    meta = bp._meta("acc1")
+    assert not meta["risk_control"] and meta["login_ok"] != 0 and bp.used_today("acc1") == 0
+
+
+def test_rotation_is_rate_limited_per_account(tmp_path, monkeypatch):
+    bp, checks, rotations, calls = _setup(tmp_path, monkeypatch, ("acc1",), lambda name, n: False)
+    assert _run(bp.ensure_live_egress("acc1"))[0] is False
+    assert _run(bp.ensure_live_egress("acc1"))[0] is False
+    assert rotations == ["acc1"]          # the second failure inside the gap does not rotate again
+
+
+def test_unbound_accounts_and_disabled_precheck_are_not_probed(tmp_path, monkeypatch):
+    module, bp = _pool(tmp_path, monkeypatch, ("acc1",))
+    monkeypatch.setattr(module.config, "ISOLATE_SHARED_EGRESS", False)
+    probed = []
+    monkeypatch.setattr(module, "egress_alive", lambda name: probed.append(name) or {"ok": False, "detail": "x"})
+    bp._has_bound_proxy = lambda name: False
+    assert _run(bp.ensure_live_egress("acc1")) == (True, "")
+    bp._has_bound_proxy = lambda name: True
+    monkeypatch.setattr(module.config, "EGRESS_PRECHECK", False)
+    assert _run(bp.ensure_live_egress("acc1")) == (True, "")
+    assert probed == []
+
+
+@pytest.mark.parametrize("work", [False, True])
+def test_strict_missing_proxy_is_excluded_before_any_dispatch(tmp_path, monkeypatch, work):
+    module, bp = _pool(tmp_path, monkeypatch, ("acc1",))
+    monkeypatch.setattr(module.config, "ISOLATE_SHARED_EGRESS", True)
+    monkeypatch.setattr(module.config, "EGRESS_PRECHECK", False)
+    bp._has_bound_proxy = lambda name: False
+    async def forbidden(*args, **kwargs):
+        pytest.fail("缺绑定代理时不得生成或发送请求")
+    bp._generate_effective = forbidden
+    attempted = []
+    with pytest.raises(RuntimeError, match="缺少启用的绑定代理"):
+        _run(bp.generate_video("湖面", "16:9", 5, "seedance-2.0-fast",
+                              execution_mode="work" if work else "auto", max_attempts=1,
+                              on_account_try=lambda *args: attempted.append(args)))
+    assert attempted == [] and bp.used_today("acc1") == 0
+    assert _run(bp.ensure_live_egress("acc1"))[0] is False
+    with pytest.raises(RuntimeError, match="禁止直连"):
+        bp._proxy_url_for("acc1")
+
+
+def test_doubao_precheck_uses_its_own_site_and_failure_blocks_dispatch(tmp_path, monkeypatch):
+    module, bp = _pool(tmp_path, monkeypatch, ("acc1",))
+    monkeypatch.setattr(module.config, "EGRESS_PRECHECK", True)
+    bp._has_bound_proxy = lambda name: True
+    bp.site_of = lambda name: "doubao"
+    seen = []
+    def alive(name, **kwargs):
+        seen.append((name, kwargs))
+        return {"ok": True, "detail": "HTTP 200"}
+    monkeypatch.setattr(module, "egress_alive", alive)
+    assert _run(bp.ensure_live_egress("acc1")) == (True, "")
+    assert seen == [("acc1", {"site": "doubao"})]
+    def broken(*args, **kwargs):
+        raise RuntimeError("http://user:secret-password@proxy.invalid")
+    monkeypatch.setattr(module, "egress_alive", broken)
+    ok, detail = _run(bp.ensure_live_egress("acc1"))
+    assert not ok and "secret" not in detail
+
+
+@pytest.mark.parametrize("transport", ["requests_proxy", "http_proxy"])
+def test_transport_rejects_missing_and_unusable_bound_routes(monkeypatch, transport):
+    import account_transport as t
+    monkeypatch.setattr(t.config, "ISOLATE_SHARED_EGRESS", True)
+    monkeypatch.setattr(t.proxy_store, "get_account_proxy", lambda name: None)
+    with pytest.raises(RuntimeError, match="禁止直连"):
+        getattr(t, transport)("acc1")
+    monkeypatch.setattr(t.proxy_store, "get_account_proxy", lambda name: {"mode": "static"})
+    monkeypatch.setattr(t.proxy_store, "account_proxy_url", lambda name: "direct")
+    with pytest.raises(RuntimeError, match="禁止直连"):
+        getattr(t, transport)("acc1")
+    monkeypatch.setattr(t.proxy_store, "get_account_proxy", lambda name: {"mode": "extract"})
+    monkeypatch.setattr(t.proxy_store, "get_session", lambda name: {})
+    with pytest.raises(RuntimeError, match="没有可用节点"):
+        getattr(t, transport)("acc1")
+
+
+def test_bound_socks_requests_resolve_dns_remotely(monkeypatch):
+    import account_transport as t
+    monkeypatch.setattr(t.proxy_store, "get_account_proxy", lambda name: {"mode": "static"})
+    monkeypatch.setattr(t.proxy_store, "account_proxy_url", lambda name: "socks5://proxy.invalid:1080")
+    assert t.requests_proxy("acc1") == "socks5h://proxy.invalid:1080"
+
+
+def test_egress_alive_reads_relay_502_as_dead(monkeypatch):
+    import account_transport, requests
+    monkeypatch.setattr(account_transport, "http_proxy", lambda account: "http://127.0.0.1:1")
+    class Resp:
+        def __init__(self, code): self.status_code = code
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    codes = iter([502, 502])
+    class Session:
+        trust_env = True
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, *a, **kw): return Resp(next(codes))
+    monkeypatch.setattr(requests, "Session", Session)
+    assert account_transport.egress_alive("acc1") == {"ok": False, "detail": "代理返回 HTTP 502"}
+    codes = iter([502, 404])
+    assert account_transport.egress_alive("acc1")["ok"] is True   # one dropped attempt is not a dead exit
+
+
+def test_upload_failure_reports_relay_upstream_failures(monkeypatch):
+    import asyncio
+    import pytest
+    import socks_relay
+    from types import SimpleNamespace
+    from generation_errors import UploadRouteError
+    from test_task_ui_regressions import load_worker_function
+    monkeypatch.setattr(socks_relay, "STATS", {"TimeoutError": 1})
+    class Page:
+        def locator(self, selector): return self
+        first = property(lambda self: self)
+        async def wait_for(self, **kw): pass
+        def on(self, event, fn): setattr(self, event, fn)
+        def remove_listener(self, event, fn): pass
+        async def count(self): return 0
+        async def wait_for_timeout(self, ms): await asyncio.sleep(0)
+        async def set_input_files(self, paths):
+            socks_relay.STATS["socks5 CONNECT 失败（代码 5）"] = 2
+            self.requestfailed(SimpleNamespace(
+                url="https://imagex-ap-southeast-1.bytevcloudapi.com/?Action=ApplyImageUpload&sig=SECRET",
+                failure="net::ERR_FAILED"))
+    with pytest.raises(UploadRouteError) as error:
+        _run(load_worker_function("attach_reference_images")(Page(), ["synthetic.png"]))
+    text = str(error.value)
+    assert "中转上游失败 socks5 CONNECT 失败（代码 5）×2" in text
+    assert "TimeoutError" not in text and "SECRET" not in text

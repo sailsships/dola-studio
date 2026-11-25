@@ -1,0 +1,10 @@
+{
+  "selectedTestsPassed": 55,
+  "fullSuiteRun": false,
+  "command": "python -m pytest tests/test_force15_material_truth.py tests/test_logout_revocation.py tests/test_cred_refresh_cooldown.py tests/test_browser_video_params.py tests/test_work_skill_selection.py tests/test_video_parameter_recovery.py -q",
+  "additionalExistingSessionSubset": {
+    "passed": 110,
+    "failed": 3,
+    "notes": "Two failures also reproduced on the original baseline; one concerns shared event-loop state. Linux fcntl is unavailable on the local Windows runner. These failures are not counted as passing."
+  }
+}

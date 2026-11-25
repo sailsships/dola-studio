@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dola Studio · 创作控制台</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg?v=20261123-brand-1">
+<link rel="alternate icon" type="image/x-icon" href="/favicon.ico?v=20261123-brand-1">
+<link rel="apple-touch-icon" href="/studio-icon-180.png?v=20261123-brand-1">
+<script src="app/dialogs.js?v=20261124-modular-1"></script>
+<script src="studio-brand.js?v=20261123-brand-1"></script>
+<script src="i18n/i18n.js?v=20261123-brand-1"></script>
+<link rel="stylesheet" href="shell.css?v=20261125-system-type-1">
+<link rel="stylesheet" href="console.css?v=20261125-system-type-1">
+<link rel="preload" as="script" href="app/request-client.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/runtime.233eaa892e34.js?v=20261125-live-audit-1">
+<link rel="preload" as="script" href="app/settings.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/releases.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/duration.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/responder.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/upscale.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/dashboard.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/accounts.dc44505c44a7.js?v=20261125-refresh-1">
+<link rel="preload" as="script" href="app/proxies.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/selection.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/credentials.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/tasks.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/videos.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/api-keys.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/diagnostics.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/creation.js?v=20261124-modular-1">
+<link rel="preload" as="script" href="app/boot.5d8bc51e2c4e.js?v=20261125-refresh-1">
+<link rel="preload" as="script" href="app/refresh-engine.71c9bbf1c395.js?v=20261125-refresh-1">
+</head>
+<body>
+<div id="requestStatus" role="status" aria-live="polite" hidden></div>
+<div id="loginMask" class="mask login" style="display:none">
+  <div class="login-hero"><div class="login-word" translate="no">Dola Studio</div><p class="login-tag">想象有了入口。<br>下一幕，由这里开始。</p></div>
+  <form class="login-form" onsubmit="event.preventDefault();submitLogin()" novalidate>
+    <div class="login-form-head">
+      <img class="login-mark" src="/logo.svg?v=20261123-brand-1" width="32" height="32" alt="Dola Studio">
+      <h2>进入创作控制台</h2>
+    </div>
+    <label for="loginUser">用户名</label>
+    <input id="loginUser" autocomplete="username" autocapitalize="off" spellcheck="false" oninput="Pool.stir()" onkeydown="if(event.key==='Enter'){event.preventDefault();q('#loginPassword').focus()}">
+    <label for="loginPassword">密码</label>
+    <input id="loginPassword" type="password" autocomplete="current-password" oninput="Pool.stir()">
+    <div class="err" id="loginErr" role="alert">用户名或密码错误</div>
+    <button class="btn btn-p login-submit" id="loginBtn" type="submit"><span>登录</span></button>
+    <div class="login-foot"><select class="lang-sel" data-i18n-switcher aria-label="Language"></select></div>
+  </form>
+  <p class="login-caption">DOLA / CREATION CONSOLE</p>
+</div>
+
+<aside class="sidebar">
+  <div class="brand"><img class="brand-logo" src="/logo.svg?v=20261123-brand-1" width="32" height="32" alt="Dola Studio"><span class="brand-t">Dola Studio</span></div>
+
+  <nav class="side-nav" aria-label="主要导航"><p class="nav-group">创作中心</p>
+<button class="nav-item on" data-tab="dash" title="工作台" aria-label="工作台" onclick="switchTab('dash')"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="1.8"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.8"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.8"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.8"/></svg><span>创作工作台</span></button>
+<button class="nav-item" data-tab="tasks" title="任务" aria-label="任务" onclick="switchTab('tasks')"><svg viewBox="0 0 24 24"><path d="M9.5 6h10.5M9.5 12h10.5M9.5 18h10.5"/><circle cx="4.8" cy="6" r="1.4"/><circle cx="4.8" cy="12" r="1.4"/><circle cx="4.8" cy="18" r="1.4"/></svg><span>任务列表</span></button>
+<button class="nav-item" data-tab="videos" title="作品" aria-label="作品" onclick="switchTab('videos')"><svg viewBox="0 0 24 24"><rect x="2.8" y="5" width="18.4" height="14" rx="2.6"/><path d="M10.2 9.3l5.2 2.7-5.2 2.7z" fill="currentColor" stroke="none"/></svg><span>视频作品</span></button>
+<p class="nav-group resources">资源管理</p>
+<button class="nav-item" data-tab="accounts" title="账号" aria-label="账号" onclick="switchTab('accounts')"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.8 20c0-3.5 3.2-5.9 7.2-5.9s7.2 2.4 7.2 5.9"/></svg><span>账号管理</span></button>
+<button class="nav-item" data-tab="proxies" title="代理" aria-label="代理" onclick="switchTab('proxies')"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M3.4 12h17.2M12 3.4c2.4 2.7 2.4 14.5 0 17.2M12 3.4c-2.4 2.7-2.4 14.5 0 17.2"/></svg><span>代理管理</span></button>
+<button class="nav-item" data-tab="keys" title="API 密钥" aria-label="API 密钥" onclick="switchTab('keys')"><svg viewBox="0 0 24 24"><circle cx="8" cy="14.4" r="4.3"/><path d="M11.2 11.2l8-8M17 5.4l2.4 2.4M14.4 8l2.4 2.4"/></svg><span>API 密钥</span></button>
+<button class="nav-item" data-tab="api" title="API 调试" aria-label="API 调试" onclick="switchTab('api')"><svg viewBox="0 0 24 24"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/></svg><span>API 调试</span></button>
+  </nav>
+
+  <div class="side-foot sidebar-tools" aria-label="控制台工具">
+    <div class="refresh-row">
+    <label class="sw-row"><input type="checkbox" id="autoCk" checked onchange="autoRefresh=this.checked">自动刷新</label>
+      <button class="btn top-btn" id="refreshBtn" onclick="manualRefresh(this)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/></svg>刷新</button>
+    </div>
+    <span id="lastUpdate"></span>
+    <div class="top-actions">
+      <div class="top-menu">
+        <button class="btn top-btn" id="setBtn" aria-haspopup="menu" aria-expanded="false" onclick="toggleTopMenu(event)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>设置<svg class="caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button>
+        <div class="top-menu-list" id="topMenu" role="menu" hidden>
+          <button role="menuitem" onclick="closeTopMenu();openConcurrencySettings()">全局并发</button>
+          <button role="menuitem" onclick="closeTopMenu();openWindowConcurrencySettings()">窗口并发</button>
+          <button role="menuitem" onclick="closeTopMenu();openUpscaleSettings()">视频超分</button>
+          <button role="menuitem" onclick="closeTopMenu();openResponderSettings()">AI 代答</button>
+          <button role="menuitem" onclick="closeTopMenu();openPassword()">修改密码</button><button role="menuitem" onclick="closeTopMenu();logout()">退出登录</button><button class="ver-chip" id="verBtn" onclick="closeTopMenu();openUpdate()">版本与更新</button>
+        </div>
+      </div>
+      <span class="top-sep" aria-hidden="true"></span>
+      
+      <select class="lang-sel" data-i18n-switcher aria-label="Language"></select>
+      <span class="top-sep" aria-hidden="true"></span>
+      <button class="btn top-btn top-logout" onclick="logout()" title="清除面板密码"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/></svg>注销</button>
+    </div>
+  </div>
+</aside>
+<header class="workspace-header"><div class="workspace-name"><b>视频创作空间</b><span>视频创作控制台</span></div></header>
+
+<main>
+  <section id="tab-dash">
+    <div class="screen-heading"><div><h1 class="page-title">创作工作台</h1><p>两种生成方式，把每个 15 秒的灵感送入画面。</p></div><span class="screen-ref">DOLA / STUDIO</span></div>
+    <div class="studio-grid">
+      <div class="card composer"><div class="panel-head"><h2>开始一次创作</h2><small>Seedance 2.0 Fast</small></div>
+        <div class="mode-deck"><button type="button" class="mode-channel" data-studio-mode="chat" aria-pressed="true" onclick="setStudioMode('chat')"><b>聊天模式</b><span class="mode-time">15<small>s</small></span><small>在聊天会话中生成视频</small></button><button type="button" class="mode-channel" data-studio-mode="work" aria-pressed="false" onclick="setStudioMode('work')"><b>工作模式</b><span class="mode-time">15<small>s</small></span><small>在工作空间中生成视频</small></button></div>
+        <div class="draft-wrap"><label for="studioPrompt">画面描述</label><textarea id="studioPrompt" placeholder="从一个画面开始。描述光线、动作，以及镜头如何移动…"></textarea></div>
+        <div class="composer-footer"><select id="studioAccount" aria-label="选择生成账号"><option value="">正在读取账号…</option></select><span class="format-note">16:9 / 15s</span><button class="btn btn-p" onclick="openStudioCreate()">继续配置 →</button></div>
+      </div>
+      <div class="card capacity"><div class="panel-head"><h2>号池容量</h2><small>LIVE</small></div><div class="capacity-body"><div class="capacity-value"><strong id="capacityAvailable">—</strong><span>可用账号</span></div><div class="capacity-meter"><i id="capacityMeter" style="width:0"></i></div><dl><dt>账号总数</dt><dd id="capacityTotal">—</dd><dt>剩余积分</dt><dd id="capacityCredit">—</dd><dt>生成方式</dt><dd>聊天 / 工作</dd></dl></div><div class="capacity-note"><button onclick="switchTab('accounts')">管理账号与调度 <span>↗</span></button></div></div>
+    </div>
+    <div class="card queue-panel"><div class="panel-head"><h3>任务轨道 <small id="queueSummary">正在读取…</small></h3><button class="section-link" onclick="switchTab('tasks')">全部任务 ↗</button></div><div id="recentLanes"><div class="empty">正在读取最近任务…</div></div></div>
+    <div class="bottom-grid"><div class="card"><div class="cards" id="statCards"></div><h3 class="chart-head">近 7 日生成记录<span class="chart-legend"><i class="lg lg-ok"></i>完成<i class="lg lg-bad"></i>失败</span></h3><div class="chart" id="chart" role="img" aria-label="近七日完成和失败任务数量，每个日期可查看柱形数值"></div></div>
+    <div class="card"><div class="panel-head" style="padding:0;border:0;margin-bottom:6px"><h3>账号调度概况</h3><button class="section-link" onclick="switchTab('accounts')">管理账号 ↗</button></div><div class="groupbar" id="poolGroups"></div><div id="perAccount"></div></div></div>
+  </section>
+
+  <section id="tab-accounts" style="display:none">
+    <div class="card">
+      <div class="toolbar">
+        <h1 class="page-title">账号列表</h1>
+        <span id="resetHint" class="tiny"></span>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input type="search" id="search_accounts" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--bg);color:var(--text);width:220px" placeholder="搜索账号 / 邮箱 / 备注 / 代理" oninput="setSearch('accounts',this.value)">
+          <select id="srcFilter" style="font-size:13px" onchange="srcFilterVal=this.value;accPage=1;renderAccounts()">
+            <option value="all">全部来源</option>
+            <option value="login">账号登录</option>
+            <option value="apple">Apple 登录</option>
+            <option value="cookie">Cookie 载入</option>
+          </select>
+          <button class="btn" id="btnVerifySel" onclick="batchVerifySelected()" disabled>验证选中</button>
+          <details class="more-tools"><summary>更多操作</summary><div class="tool-menu">          <button class="btn btn-danger" id="btnDelSel" onclick="deleteSelectedAccounts()" disabled>删除选中</button>
+          <button class="btn" id="btnProbeHello" onclick="batchProbeHello()" title="按账号模式探测：Cloak 使用独立浏览器，超时未确认不判风控；不勾选则探测当前筛选账号">你好探测</button>
+          <button class="btn" id="btnProbeIps_accounts" onclick="batchProbeIps('accounts')" title="探测勾选账号；未勾选时探测当前筛选结果，忙碌账号跳过">一键探测出口 IP</button>
+          <button class="btn" id="btnBatchRecover" onclick="batchRecover()" title="批量把选中的号从【风控】/【异常】组放出来（风控恢复后回到【待激活】，建议接着探测一次）">批量恢复</button>
+          <button class="btn" id="btnProxySel" onclick="openBatchProxy()" disabled>更改代理</button>
+          <button class="btn" id="btnExportCookies" onclick="exportAccountCookies()" disabled>导出选中 Cookie</button>
+          <button class="btn" onclick="resetAllQuotas()" title="立即恢复全池额度（每天按设定时点自动执行一次）">重置额度</button>
+</div></details>
+          <button class="btn" onclick="openBatchAdd()">批量添加</button>
+          <button class="btn btn-p" onclick="openAddAccount()">添加账号</button>
+        </div>
+      </div>
+      <div class="groupbar" id="groupBar"></div>
+      <div id="egressWarn"></div>
+      <div id="ipProbe_accounts" class="ip-probe-panel" role="status" aria-live="polite"></div>
+      <div id="accountsTable"></div>
+    </div>
+  </section>
+
+  <section id="tab-proxies" style="display:none">
+    <div class="card">
+      <div class="toolbar">
+        <h1 class="page-title">代理列表</h1>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input type="search" id="search_proxies" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--bg);color:var(--text);width:220px" placeholder="搜索名称 / 地址 / 用户名 / 备注" oninput="setSearch('proxies',this.value)">
+          <button class="btn" onclick="selAllToggle('proxies')">全选 / 取消</button>
+          <button class="btn" id="btnProbeIps_proxies" onclick="batchProbeIps('proxies')" title="探测勾选代理；未勾选时探测当前筛选结果">一键探测出口 IP</button>
+          <button class="btn btn-danger" id="delSel_proxies" disabled onclick="delSelected('proxies')">删除选中</button>
+          <button class="btn btn-p" onclick="openAddProxy()">＋ 添加代理</button>
+        </div>
+      </div>
+      <div class="hint" style="margin-bottom:12px">
+        可添加多个 HTTP/SOCKS 代理：<b>静态IP</b>填一条固定出口；<b>动态IP</b>不用填 IP、端口，
+        用「提取链接」或直接「粘贴节点（host:port:user:pass，可批量）」组成节点池，一个节点分给一个号。
+        在“账号管理 → 操作 → 代理”里给每个账号选择；也可以勾选账号后点“更改代理”批量绑定。
+        未给账号指定代理时，使用环境变量默认代理
+        <span id="defaultProxyShow" style="font-family:monospace"></span>。
+      </div>
+      <div id="proxiesTable"></div>
+      <div id="ipProbe_proxies" class="ip-probe-panel" role="status" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <section id="tab-tasks" style="display:none">
+    <div class="card">
+      <div class="toolbar">
+        <h1 class="page-title" id="tasksTitle">任务列表</h1>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input type="search" id="search_tasks" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--bg);color:var(--text);width:220px" placeholder="搜索提示词 / 账号 / ID / 报错" oninput="setSearch('tasks',this.value)">
+          <button class="btn" onclick="selAllToggle('tasks')">全选 / 取消</button>
+          <button class="btn btn-danger" id="delSel_tasks" disabled onclick="delSelected('tasks')">删除选中</button>
+        </div>
+      </div>
+      <div id="tasksPagerTop" aria-label="任务列表顶部分页"></div>
+      <div id="tasksTable"></div>
+      <div id="tasksPager" aria-label="任务列表分页"></div>
+    </div>
+  </section>
+
+  <section id="tab-videos" style="display:none">
+    <div class="card">
+      <div class="toolbar">
+        <h1 class="page-title">视频管理（已生成的视频）</h1>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input type="search" id="search_videos" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--bg);color:var(--text);width:220px" placeholder="搜索提示词 / 账号 / 模型" oninput="setSearch('videos',this.value)">
+          <button class="btn btn-danger" id="btnDelVideos" onclick="delSelectedVideos()" disabled>删除选中</button>
+          <button class="btn" onclick="loadVideos()">刷新</button>
+        </div>
+      </div>
+      <div id="videoStat" style="margin:10px 0 6px;color:var(--sub);font-size:13px">视频统计加载中…</div>
+      <div id="videosTable"></div>
+    </div>
+  </section>
+
+  <section id="tab-keys" style="display:none">
+    <div class="card">
+      <div class="toolbar">
+        <h1 class="page-title">API 密钥</h1>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input type="search" id="search_keys" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--bg);color:var(--text);width:220px" placeholder="搜索名称 / Key" oninput="setSearch('keys',this.value)">
+          <button class="btn" onclick="selAllToggle('keys')">全选 / 取消</button>
+          <button class="btn btn-danger" id="delSel_keys" disabled onclick="delSelected('keys')">删除选中</button>
+          <button class="btn btn-p" onclick="openCreateKey()">＋ 创建密钥</button>
+        </div>
+      </div>
+      <div class="hint" style="margin-bottom:12px">每个 Key 可独立设置每日额度、并发数和允许时长；0 表示不限。环境变量里的 key 始终有效、不在此列表。</div>
+      <div id="keysTable"></div>
+    </div>
+  </section>
+<section id="tab-api" style="display:none" aria-labelledby="apiGuideTitle">
+  <div class="screen-heading"><div><h1 class="page-title" id="apiGuideTitle">API 调试</h1><p>从连接配置到生成结果，一份可以直接使用的接入手册。</p></div><span class="screen-ref">DOLA + DOUBAO / API</span></div>
+  <div class="api-guide-nav" aria-label="说明书目录">
+    <a href="#ag-connection">连接配置</a><a href="#ag-debug">在线调试</a><a href="#ag-examples">代码示例</a><a href="#ag-handbook">完整说明</a>
+  </div>
+  <div class="api-workspace">
+    <div class="card api-connection" id="ag-connection">
+      <div class="api-section-title"><h2>配置连接模板</h2><span class="tiny">地址可修改 · 当前浏览器保存</span></div>
+      <div class="api-form-grid">
+        <label>模板名称<input id="ag-name" maxlength="80" value="我的 API 接入" data-ag="name"></label>
+        <label><span>调用方网站地址 <span class="tiny">选填</span></span><input id="ag-website" type="url" placeholder="https://www.example.com" data-ag="website"></label>
+        <label class="api-field-wide">API 服务地址<input id="ag-base" type="url" placeholder="https://api.example.com" data-ag="base" spellcheck="false"><span class="tiny">填写部署这套管理软件的域名或 IP，可带反向代理前缀。末尾的 /v1 会自动去重。</span></label>
+        <label class="api-field-wide">客户 API Key<div class="api-secret"><input id="ag-key" type="password" placeholder="粘贴 API 密钥页面创建的 Key" autocomplete="off" spellcheck="false"><button type="button" class="btn" id="ag-key-toggle" aria-label="显示客户 API Key" aria-pressed="false">显示</button></div><span class="tiny">使用客户 Key，与面板登录密码不同。仅在本页内存中使用，保存和导出均不包含密钥。</span></label>
+        <label>视频模型<select id="ag-model" data-ag="model"></select></label>
+        <label>生成模式<select id="ag-mode" data-ag="mode"><option value="chat">聊天模式</option><option value="work">工作模式</option></select></label>
+        <label>视频时长<select id="ag-duration" data-ag="duration"><option value="5">5 秒</option><option value="10">10 秒</option><option value="15" selected>15 秒</option></select></label>
+        <label>画面比例<select id="ag-ratio" data-ag="ratio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option></select></label>
+        <label class="api-field-wide">图片模型<select id="ag-image-model" data-ag="imageModel"></select></label>
+        <label class="api-field-wide">示例提示词<textarea id="ag-prompt" rows="4" data-ag="prompt" maxlength="10000"></textarea></label>
+        <label class="api-field-wide"><span>接入备注 <span class="tiny">选填</span></span><textarea id="ag-notes" rows="2" data-ag="notes" maxlength="2000" placeholder="例如：网站后台调用、客户名称、部署环境"></textarea></label>
+      </div>
+      <div class="api-template-actions"><button class="btn btn-p" id="ag-save">保存模板</button><button class="btn" id="ag-export">导出模板</button><button class="btn" id="ag-import">导入模板</button><button class="btn" id="ag-reset">恢复默认</button><input type="file" id="ag-import-file" accept="application/json,.json" hidden></div>
+      <p id="ag-save-status" class="tiny" role="status" aria-live="polite">修改配置后，右侧请求和下方代码会同步更新。</p>
+    </div>
+    <div class="card api-debug" id="ag-debug">
+      <div class="api-section-title"><h2>验证连接与请求</h2><span id="ag-transport" class="tiny">浏览器直连</span></div>
+      <div class="api-form-grid">
+        <label class="api-field-wide">调试操作<select id="ag-operation"><option value="models">读取模型列表 · GET</option><option value="video">创建视频任务 · POST</option><option value="task">查询视频任务 · GET</option><option value="image">生成图片 · POST</option><option value="arkCreate">Ark 创建视频任务 · POST</option><option value="arkTask">Ark 查询视频任务 · GET</option></select></label>
+        <label class="api-field-wide" id="ag-id-field" hidden>任务 ID<input id="ag-task-id" placeholder="粘贴创建请求返回的 id" spellcheck="false"></label>
+        <label>请求超时（秒）<input id="ag-timeout" type="number" min="5" max="600" step="1" value="30"></label>
+        <div class="api-debug-note tiny" id="ag-operation-note">先读取模型列表，确认地址可访问；模型列表不验证 Key 是否有效。</div>
+      </div>
+      <div class="api-endpoint" translate="no"><b id="ag-method">GET</b><code id="ag-url"></code></div>
+      <div class="api-code-title"><h3>请求头</h3><span class="tiny">密钥脱敏展示</span></div><pre id="ag-headers" translate="no"></pre>
+      <div id="ag-body-field" hidden><div class="api-code-title"><h3>请求 JSON</h3><button class="section-link" id="ag-rebuild">按配置重建</button></div><textarea id="ag-body" rows="10" spellcheck="false" aria-label="调试请求 JSON" translate="no"></textarea><p class="tiny">可直接修改 JSON。修改左侧生成参数或切换操作时，会按配置重建。</p></div>
+      <label class="api-write-check" id="ag-confirm-field" hidden><input type="checkbox" id="ag-confirm">本次提交真实生成任务，会使用账号额度。</label>
+      <div class="api-template-actions"><button class="btn btn-p" id="ag-send">发送请求</button><button class="btn" id="ag-cancel" disabled>停止等待</button><button class="btn" id="ag-use-id" hidden>使用返回 ID 查询</button></div>
+      <div class="api-response-head"><h3>响应结果</h3><span id="ag-result-status" class="tiny" role="status" aria-live="polite">尚未发送请求</span></div>
+      <pre id="ag-response" translate="no">请求完成后，会在这里显示 HTTP 状态、耗时和响应正文。</pre>
+      <p class="tiny">创建成功仅代表受理。视频需要继续查询，直到 completed / succeeded。停止等待或浏览器超时不会取消服务端已受理的任务，也不会自动重发。</p>
+    </div>
+  </div>
+  <div class="card" id="ag-examples">
+    <div class="api-section-title"><h2>复制调用示例</h2><button class="btn" id="ag-download-guide">下载接入说明</button></div>
+    <p class="tiny">根据当前调试操作和配置生成。代码使用环境变量 API_KEY；不会把输入的真实密钥写进示例。Python / JavaScript 的视频创建示例包含查询循环。</p>
+    <div class="api-code-tabs" role="tablist" aria-label="代码语言"><button class="btn" id="ag-lang-powershell" role="tab" aria-selected="true" aria-controls="ag-code-powershell">PowerShell</button><button class="btn" id="ag-lang-curl" role="tab" aria-selected="false" aria-controls="ag-code-curl">cURL</button><button class="btn" id="ag-lang-python" role="tab" aria-selected="false" aria-controls="ag-code-python">Python</button><button class="btn" id="ag-lang-javascript" role="tab" aria-selected="false" aria-controls="ag-code-javascript">JavaScript / Node.js</button><button class="btn" id="ag-copy">复制代码</button></div>
+    <pre id="ag-code-powershell" role="tabpanel" aria-labelledby="ag-lang-powershell" translate="no"></pre><pre hidden id="ag-code-curl" role="tabpanel" aria-labelledby="ag-lang-curl" translate="no"></pre><pre id="ag-code-python" role="tabpanel" aria-labelledby="ag-lang-python" translate="no" hidden></pre><pre id="ag-code-javascript" role="tabpanel" aria-labelledby="ag-lang-javascript" translate="no" hidden></pre>
+    <p id="ag-copy-status" class="tiny" role="status" aria-live="polite"></p>
+  </div>
+  <div class="card api-handbook" id="ag-handbook">
+    <div class="api-section-title"><h2>完整接入说明</h2><span class="tiny">参数、流程、网站接入与排错</span></div>
+    <details open><summary>第一步：网站地址、API 地址和 Key 分别填什么？</summary><div class="api-prose">
+      <p><b>调用方网站</b>是客户访问的前台，例如 https://www.example.com；<b>API 服务地址</b>是这套管理软件部署的地址，例如 https://api.example.com，两者可以不同。填网站地址只是记录接入环境，不会自动配置 DNS、回调、CORS 或反向代理。</p>
+      <p><b>根地址</b>填写 https://api.example.com；某些工具要求 <b>OpenAI Base URL</b>，填写 https://api.example.com/v1。调试器会把末尾重复的 /v1 去掉，再拼接完整路径。部署在子路径时填写 https://example.com/studio，接口为 /studio/v1/…。</p>
+      <p><b>API Key</b>在左侧“API 密钥”中创建并复制，请求头为 <code>Authorization: Bearer YOUR_API_KEY</code>。不要填写面板密码、Cookie 或上游平台 Key。模型列表可以匿名读取；它成功不代表鉴权和生成可用，最终以实际请求及任务状态为准。</p>
+      <p>保存模板只保存在当前网站、当前浏览器。换浏览器或给另一台机器使用时，导出 JSON 再导入；导出的模板和说明都不包含真实 Key，需要在目标环境单独填写。</p>
+    </div></details>
+    <details open><summary>第二步：选择 Dola 或豆包，以及聊天 / 工作模式</summary><div class="api-prose">
+      <p><code>seedance-2.0-fast</code>、<code>seedance-2.5</code>路由到 Dola；<code>doubao-seedance-*</code>路由到豆包视频账号；<code>doubao-seedream-*</code>路由到豆包生图账号。模型名决定平台，不能把豆包模型名改写为 Dola 模型名来通用调用。</p>
+      <p>聊天模式传 <code>execution_mode: "chat"</code>，工作模式传 <code>execution_mode: "work"</code>。Seedance 2.0 Fast 的两种模式均可配置 15 秒；最终还受账号能力、额度及 Key 允许时长限制。部分豆包账号只适用个人聊天或工作空间，选项必须与账号类型相符。</p>
+      <p>本模板默认只提供 5 / 10 / 15 秒，以单条视频接入为主。不同模型支持的档位可能不同；以服务端校验和账号能力为准。30 秒与双视频需要额外部署能力和额度，不能仅修改时长获得支持。模型清单代表接口已识别的模型，不保证池中有对应的可用账号。</p>
+    </div></details>
+    <details open><summary>第三步：视频异步流程与返回字段</summary><div class="api-prose">
+      <ol><li>POST <code>/v1/videos/generations</code>，提交 UTF-8 JSON，保存返回的 <code>id</code>。兼容入口 <code>/v1/videos</code>使用相同逻辑，成功返回 HTTP 202。</li><li>每隔 5～10 秒 GET <code>/v1/videos/{id}</code>。需要使用创建任务时的客户 Key；不同 Key 不能查询彼此的任务。</li><li><code>queued</code>为排队，<code>processing</code>为处理中，<code>completed</code>才代表完成，<code>failed</code>查看 error。进度说明在 progress，最终视频在 video_url；多视频结果可能在 videos，高清结果可能在 video_url_hd。</li><li>保存最终结果；可用 GET <code>/v1/videos/{id}/content</code>读取完成视频。视频地址可能有过期时间或保留期限，长久保存请及时下载。</li></ol>
+      <p>如果创建请求超时且未收到 ID，结果可能不确定。先在任务列表按时间和提示词核对，不要立即重复 POST；本接口没有公开的幂等键保证。调试器不会自动轮询或自动重发，点击“使用返回 ID 查询”可以继续手动查询。</p>
+    </div></details>
+    <details open><summary>视频、图片与 Ark 接口速查</summary><div class="api-table-scroll"><table><thead><tr><th>方法与路径</th><th>用途</th><th>说明</th></tr></thead><tbody>
+      <tr><td>GET /v1/models</td><td>模型列表</td><td>当前公开读取；不验证 Key</td></tr><tr><td>POST /v1/videos/generations</td><td>创建视频</td><td>JSON 或 multipart；异步返回任务 ID</td></tr><tr><td>POST /v1/videos</td><td>兼容视频入口</td><td>相同生成逻辑，HTTP 202</td></tr><tr><td>GET /v1/videos/{id}</td><td>查询视频</td><td>需使用创建时的 Key</td></tr><tr><td>GET /v1/videos/{id}/content</td><td>读取完成视频</td><td>视频流或重定向，适合下载</td></tr><tr><td>POST /v1/images/generations</td><td>豆包生图</td><td>同步返回 data 数组，含图片 url</td></tr><tr><td>POST /v1/images/edits</td><td>豆包改图</td><td>JSON 参考图或 multipart 文件</td></tr><tr><td>POST /api/v3/contents/generations/tasks</td><td>Ark 创建视频</td><td>content 数组，异步任务</td></tr><tr><td>GET /api/v3/contents/generations/tasks/{id}</td><td>Ark 查询视频</td><td>queued / running / succeeded / failed</td></tr>
+    </tbody></table></div><div class="api-prose"><p>Ark 还兼容 <code>/v1/video/contents/generations/tasks</code> 和 <code>/v1/contents/generations/tasks</code>。这套服务提供视频 / 图片接口，并不等同于通用文字聊天接口；工具只支持 /v1/chat/completions 时，需要在工具侧选择视频插件或视频提供商。</p></div></details>
+    <details open><summary>请求参数：哪些必填，哪些可按需修改？</summary><div class="api-table-scroll"><table><thead><tr><th>字段</th><th>类型 / 示例</th><th>用途与限制</th></tr></thead><tbody>
+      <tr><td>model</td><td>string</td><td>建议显式指定；Dola、豆包视频与图片模型不同</td></tr><tr><td>prompt</td><td>string</td><td>非空 UTF-8 描述，不要用乱码或问号替换中文</td></tr><tr><td>execution_mode</td><td>chat / work</td><td>视频模式；图片请求不需要此字段</td></tr><tr><td>duration</td><td>整数，例如 15</td><td>视频秒数；兼容 seconds / duration_seconds，优先 duration</td></tr><tr><td>ratio</td><td>16:9 / 9:16 / 1:1</td><td>画面比例；size 可按接口要求提供尺寸</td></tr><tr><td>video_count</td><td>1，部分能力支持 2</td><td>模板固定单条；双条取决于模型、模式与部署配置</td></tr><tr><td>reference_images</td><td>URL 字符串数组</td><td>图生视频 / 图生图，支持公网可读取 URL 或 data URL</td></tr><tr><td>reference_audio</td><td>URL 字符串数组</td><td>受模型和模式限制；Seedance 2.0 Fast 聊天 15 秒可用，工作模式不支持</td></tr><tr><td>reference_source</td><td>unspecified / ai_generated</td><td>根据素材真实来源填写；不影响认证</td></tr><tr><td>resolution</td><td>720p / 1080p / 2k / 4k</td><td>视频原片或自动超分配置；写分辨率不等于已开启高清能力</td></tr><tr><td>n</td><td>1～4</td><td>图片张数，不是视频条数；还取决于上游能力</td></tr><tr><td>response_format</td><td>url / b64_json</td><td>图片响应格式，默认 url</td></tr>
+    </tbody></table></div><div class="api-prose"><p>Ark 创建请求把提示词放在 <code>content: [{"type":"text","text":"…"}]</code> 中；参考图可使用 <code>{"type":"image_url","image_url":{"url":"https://…"}}</code>。直接编辑右上 JSON 后可调试参考素材；模板参数变化会重建请求体。</p></div></details>
+    <details open><summary>接入自己的网站、画布或第三方工具</summary><div class="api-prose">
+      <p><b>网站后台调用：</b>前端把用户输入交给自己的网站后台，后台从环境变量读取客户 Key 并调用这里的 API，返回任务 ID 给前端；前端向自己的后台查询结果。提供的 Node.js / Python 示例可作为后台调用模块。不要把公共网站的服务器 Key 写入前端源码、HTML 或公开仓库。</p>
+      <p><b>画布 / New API：</b>若配置项叫“服务地址”，填写根地址；若明确叫 OpenAI Base URL，通常填写根地址加 /v1。视频入口选择 /v1/videos/generations 或 /v1/videos，模型填写本页模型列表中的原始 ID，Key 填客户 Key。路径拼接方式由工具决定，以工具实际发出的请求为准。</p>
+      <p><b>浏览器直接调试：</b>本页请求直接从浏览器发到填写的 API 地址。跨域时由目标服务允许当前页面来源的 CORS；HTTPS 页面访问 HTTP 服务可能被浏览器阻止。网站地址字段不能解除这些限制。遇到连接异常时可用生成的 cURL / 后台示例核对。</p>
+      <p><b>域名和反向代理：</b>域名应解析到 API 服务并配置有效 HTTPS。代理需把 /v1 和 /api/v3 对应路径转发到这套服务，保留 Authorization 请求头；图片接口是同步返回，代理超时需要覆盖实际生图耗时。视频创建异步返回，不需要一直等到视频生成结束。</p>
+    </div></details>
+    <details open><summary>常见错误、重试与接入验收</summary><div class="api-table-scroll"><table><thead><tr><th>现象</th><th>检查方向</th></tr></thead><tbody>
+      <tr><td>401</td><td>Bearer 头、Key 内容、是否已停用或过期；不要用面板登录密码</td></tr><tr><td>403 / 429</td><td>读取 detail；Key 配额、并发、时长权限、账号额度或平台限流；不要立即批量重试</td></tr><tr><td>404</td><td>根地址、反向代理前缀、重复 /v1、任务 ID；查询时使用创建任务的 Key</td></tr><tr><td>422</td><td>字段类型、模型名、时长、模式、素材格式与账号能力，以 detail 为准</td></tr><tr><td>502 / 503 / 504</td><td>上游异常、无可用账号、超时；核对任务状态和代理后再决定是否重试</td></tr><tr><td>浏览器 Failed to fetch</td><td>CORS、HTTPS / HTTP、DNS、证书或网络；不代表 Key 校验失败</td></tr><tr><td>HTTP 200 但不能解析</td><td>可能返回了网站首页或代理错误页；检查最终 URL、路径和 Content-Type</td></tr><tr><td>有 ID 但没有视频</td><td>任务仍在排队 / 处理中；查询到 completed / succeeded 后再读取视频地址</td></tr>
+    </tbody></table></div><div class="api-prose"><p>建议验收顺序：读取模型列表 → 核对客户 Key 和权限 → 只提交一条 5～15 秒视频 → 保存 ID → 查询最终状态 → 打开或下载结果 → 再逐步提高并发。模型读取不耗生成额度；点击 POST 生成会使用账号额度。创建请求超时不自动重发，查询请求可在短暂间隔后再次读取。</p></div></details>
+  </div>
+</section>
+
+</main>
+
+<div id="dlg" class="dialog" style="display:none"><div class="box" id="dlgBox"></div></div>
+<div id="promptModal" class="dialog" style="display:none">
+  <div class="box" style="width:1040px">
+    <h2>任务提示词</h2>
+    <div class="tiny" id="promptMeta" style="margin-bottom:10px"></div>
+    <div class="prompt-body" id="promptBody" translate="no"></div>
+    <div class="row">
+      <button class="btn" id="promptCopyBtn" onclick="copyPrompt()">复制</button>
+      <button class="btn" onclick="hide('promptModal')">关闭</button>
+    </div>
+  </div>
+</div>
+<div id="thumbModal" class="dialog" style="display:none">
+  <div class="box" style="width:520px">
+    <h2>参考图</h2>
+    <img id="thumbImg" alt="参考图">
+    <div class="row"><button class="btn" onclick="hide('thumbModal')">关闭</button></div>
+  </div>
+</div>
+<div id="videoModal" class="dialog" style="display:none">
+  <div class="box" style="width:640px">
+    <h2>视频预览</h2>
+    <video id="videoEl" controls autoplay style="width:100%;border-radius:8px"></video>
+    <div class="row"><button class="btn" onclick="closeVideo()">关闭</button></div>
+  </div>
+</div>
+
+<script src="console-sync.js?v=20261123-live-state-1"></script>
+<script src="app/request-client.js?v=20261124-modular-1"></script>
+<script src="app/refresh-engine.71c9bbf1c395.js?v=20261125-refresh-1"></script>
+<script src="app/runtime.233eaa892e34.js?v=20261125-live-audit-1"></script>
+<script src="app/settings.js?v=20261124-modular-1"></script>
+<script src="app/releases.js?v=20261124-modular-1"></script>
+<script src="app/duration.js?v=20261124-modular-1"></script>
+<script src="app/responder.js?v=20261124-modular-1"></script>
+<script src="app/upscale.js?v=20261124-modular-1"></script>
+<script src="app/dashboard.js?v=20261124-modular-1"></script>
+<script src="app/accounts.dc44505c44a7.js?v=20261125-refresh-1"></script>
+<script src="app/proxies.js?v=20261124-modular-1"></script>
+<script src="app/selection.js?v=20261124-modular-1"></script>
+<script src="app/credentials.js?v=20261124-modular-1"></script>
+<script src="app/tasks.js?v=20261124-modular-1"></script>
+<script src="app/videos.js?v=20261124-modular-1"></script>
+<script src="app/api-keys.js?v=20261124-modular-1"></script>
+<script src="app/diagnostics.js?v=20261124-modular-1"></script>
+<script src="app/creation.js?v=20261124-modular-1"></script>
+<script src="app/boot.5d8bc51e2c4e.js?v=20261125-refresh-1"></script>
+<script src="api-guide.js?v=20261123-api-guide-2"></script>
+</body>
+</html>
