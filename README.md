@@ -1,16 +1,3 @@
-<h2 align="center">项目交流</h2>
-
-<p align="center">
-  欢迎加入 Dola Studio 技术交流群，交流使用经验、反馈问题与讨论项目开发。<br>
-  <strong>QQ 群：647127178</strong> · 扫描下方二维码加入
-</p>
-
-<p align="center">
-  <a href="docs/assets/project-community-qq.jpg"><img src="docs/assets/project-community-qq.jpg" width="360" alt="Dola Studio 项目技术交流群二维码，QQ 群号 647127178"></a>
-</p>
-
----
-
 <p align="center">
   <img src="web/logo.svg" width="96" height="96" alt="Dola Studio Logo">
 </p>
@@ -18,8 +5,8 @@
 <h1 align="center">Dola Studio</h1>
 
 <p align="center">
-  <strong>Dola · 豆包账号与视频任务管理工作台</strong><br>
-  在一个界面里管理账号、代理、创作任务与视频作品，通过统一 API 连接自己的应用。
+  <strong>Dola 10 秒突破至 15 秒 · 豆包账号批量管理</strong><br>
+  聊天模式与工作模式，两种 15 秒生成方案。
 </p>
 
 <p align="center">
@@ -31,6 +18,7 @@
 </p>
 
 <p align="center">
+  <a href="docs/BEGINNER-GUIDE.zh-CN.md">新人指南</a> ·
   <a href="#features">功能特性</a> ·
   <a href="#modes">生成模式</a> ·
   <a href="#quick-start">快速开始</a> ·
@@ -45,20 +33,21 @@
 
 ## 项目介绍
 
-Dola Studio 是一个可自行部署的 Web 管理工具，为 Dola 和豆包提供统一的账号、代理、生成任务与作品管理入口。
+Dola Studio 聚焦两件事：**豆包账号批量管理**，以及**通过聊天模式、工作模式两种方案，将 Dola 视频生成从默认 10 秒扩展至 15 秒**。
 
-创建视频时，可以选择**聊天模式**或**工作模式**，设置模型、时长、比例与提示词，并按支持的组合添加参考图片或音频。提交后由后台管理账号执行、上游会话、结果查询与作品交付，前台持续同步任务变化。
+<a href="docs/assets/project-community-qr.png"><img align="right" src="docs/assets/project-community-qr.png" width="200" alt="项目交流 QQ 群二维码，群号 647127178"></a>
 
-对于需要把生成流程接入自己网站、脚本或画布工具的开发者，项目提供视频任务 API、图片 API，以及 Ark 风格的任务兼容入口，无需把管理页面操作嵌入自己的产品。
+**两种模式怎么用：**
 
-**适合的使用场景：**
+- **聊天模式**：选择 Dola 账号、Seedance 2.0 Fast、15 秒、1 条，在聊天会话内执行专用 15 秒流程。
+- **工作模式**：选择具备工作入口与可用额度的 Dola 账号，使用同一模型、15 秒，在工作空间中生成。
+- **豆包批量管理**：集中添加账号、绑定代理、验证登录状态，管理生成任务与视频作品。
 
-- 将多个账号、代理和任务集中在一个控制台管理。
-- 使用聊天或工作模式组织视频创作，跟踪结果与失败原因。
-- 为自己的应用提供统一的视频创建、状态查询和作品获取入口。
-- 为已有工作流补充账号调度、后台恢复与运行记录。
+第一次使用，请从 **[新人指南：两种模式生成 15 秒视频](docs/BEGINNER-GUIDE.zh-CN.md)** 开始，按步骤完成账号准备、代理绑定、参数选择与作品核验。
 
-生成计算由上游服务完成；本项目承担本地管理、浏览器或协议执行、文件处理和任务调度。
+项目同时提供任务追踪、作品预览下载及统一 API。生成由上游服务执行，实际结果取决于账号、额度、网络和上游回执。
+
+<br clear="all">
 
 > **当前版本状态**：服务端版本为 `1.0.1`。两种模式各有真实 15 秒视频成功记录，关键管理交互已验收。推荐 Linux 源码部署；从零安装、完整 Docker 部署及部分扩展功能仍需补充验证，详见[验证范围](#verification)。
 
@@ -66,6 +55,7 @@ Dola Studio 是一个可自行部署的 Web 管理工具，为 Dola 和豆包提
 
 ## 目录
 
+- [新人指南：10 秒到 15 秒](#beginner)
 - [功能特性](#features)
 - [界面与日常操作](#console)
 - [聊天模式与工作模式](#modes)
@@ -82,6 +72,23 @@ Dola Studio 是一个可自行部署的 Web 管理工具，为 Dola 和豆包提
 - [详细文档](#documentation)
 - [贡献与问题反馈](#contributing)
 - [许可与归属](#license)
+
+<a id="beginner"></a>
+
+## 新人指南：10 秒到 15 秒
+
+先准备一个登录有效、绑定可用代理且当前闲置的 **Dola 账号**，在“创作工作台”选择账号并打开生成配置：
+
+| 操作 | 聊天模式 | 工作模式 |
+| --- | --- | --- |
+| 选择模式 | 聊天模式 | 工作模式 |
+| 视频模型 | Seedance 2.0 Fast | Seedance 2.0 Fast |
+| 视频时长 | 15 秒 | 15 秒 |
+| 首次视频条数 | 1 条 | 1 条 |
+| 首次素材 | 纯文字 | 纯文字 |
+| 使用入口 | 聊天会话，自动进入专用 15 秒流程 | 工作空间，需要对应入口与额度 |
+
+填写提示词，点击一次“开始生成”，在任务列表等待完成，再到“视频作品”预览播放并核对实际时长。两种模式各有真实 15 秒成功记录，完整步骤、环境配置、素材支持与问题处理见 **[详细新人指南](docs/BEGINNER-GUIDE.zh-CN.md)**。
 
 <a id="features"></a>
 
@@ -742,6 +749,7 @@ python docs/reference/generate_source_reference.py
 
 | 文档 | 内容 |
 | --- | --- |
+| [新人指南](docs/BEGINNER-GUIDE.zh-CN.md) | 两种模式将 Dola 10 秒扩展至 15 秒：逐步操作、准备条件、素材、API 与排障 |
 | [完整项目文档](docs/PROJECT-GUIDE.zh-CN.md) | 33 章：产品操作、执行链、接口、部署、排障与交接 |
 | [API 路由索引](docs/reference/API-ROUTES.zh-CN.md) | 方法、路径、处理器、鉴权入口与源码位置 |
 | [环境变量索引](docs/reference/ENVIRONMENT.zh-CN.md) | 静态名称、默认参数表达式与读取点 |
