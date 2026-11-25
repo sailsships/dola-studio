@@ -33,7 +33,7 @@ from compress import GzipTextMiddleware
 from pydantic import BaseModel, Field
 
 import config
-from studio_views import public_health, account_summary, account_video_quota
+from studio_views import public_health, account_summary, account_video_quota, account_mode_capacity
 import cred_store
 import failure_text
 from account_transport import http_proxy, redact_error
@@ -1974,7 +1974,7 @@ async def _submit_task(client, model, prompt, ratio, duration, reference_images,
     if not weekly and not pool.available and pool.all_accounts_limited:
         raise HTTPException(429, "账号限流：所有已开启调度的账号均已达到 Dola 每日视频上限，请明天再试")
     if not weekly and not pool.available and pool.all_accounts_quota_blocked:
-        raise HTTPException(429, "积分不足：所有已开启调度的账号都没有足够积分，请等待额度刷新")
+        raise HTTPException(429, "额度不足：已开启调度的账号均无法生成所选视频，请等待额度恢复或选择其他模式")
     if not pool.accounts:
         raise HTTPException(503, "no account in pool")
     # data: URL（客户端内联的参考图）先落盘：几 MB 的 base64 绝不能进 tasks.db，
@@ -4816,6 +4816,11 @@ async def admin_stats(x_admin_key: str | None = Header(default=None)):
     _admin_auth(x_admin_key)
     st = store.stats()
     accs = pool.list_accounts(processing_accounts=store.busy_account_ids())
+    from browser_pool import duration_cost, start_need
+    cost, start = duration_cost('seedance-2.0-fast', 15), start_need('seedance-2.0-fast', 15)
+    now = time.time()
+    for account in accs:
+        account.update(account_video_quota(account, chat_cost=cost, chat_start=start, now=now))
     sched = [a for a in accs if a["scheduling"] and not a["cooling"]]
     st["total_accounts"] = len(accs)
     st["available_accounts"] = sum(1 for a in sched if a["remaining"] > 0)
@@ -4824,6 +4829,7 @@ async def admin_stats(x_admin_key: str | None = Header(default=None)):
     totals = st.pop("per_account_total", {})
     st["per_account"] = [{**a, "completed_total": totals.get(a["name"], 0)} for a in accs]
     st.update(_group_summary(accs, JOBS))
+    st.update(account_mode_capacity(accs))
     return st
 
 

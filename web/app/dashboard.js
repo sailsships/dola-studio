@@ -4,18 +4,19 @@ async function legacyLoadDash(){
   const sr=st.success_rate==null?'—':(st.success_rate*100).toFixed(0)+'%';
   q('#capacityAvailable').textContent=st.available_accounts;
   q('#capacityTotal').textContent=st.total_accounts;
-  q('#capacityCredit').textContent=st.total_remaining;
+  q('#capacityChat').textContent=quotaCount(st.chat_15s_available)+' 条';
+  q('#capacityWork').textContent=quotaCount(st.work_15s_available)+' 条';
   q('#capacityMeter').style.width=(st.total_accounts?st.available_accounts/st.total_accounts*100:0)+'%';
   setHTML('#statCards',`
     <div class="stat s1"><div class="v">${st.today_completed}</div><div class="l">今日出片</div></div>
     <div class="stat s2"><div class="v">${st.today_failed}</div><div class="l">今日失败</div></div>
     <div class="stat s3"><div class="v">${sr}</div><div class="l">成功率</div></div>
-    <div class="stat s4"><div class="v">${st.available_accounts}/${st.total_accounts}</div><div class="l">可用号 · 剩余 ${st.total_remaining} 点</div></div>`);
-  const counts={};st.per_account.forEach(a=>{counts[a.group||'未分组']=(counts[a.group||'未分组']||0)+1;});
+    <div class="stat s4"><div class="v">${st.available_accounts}/${st.total_accounts}</div><div class="l">可用账号 / 全部账号</div></div>`);
+  const counts={};st.per_account.forEach(a=>{const status=accountState(a).label;counts[status]=(counts[status]||0)+1;});
   setHTML('#poolGroups',Object.entries(counts).map(([g,n])=>`<span class="summary-group">${esc(g)}<b>${n}</b></span>`).join(''));
   const max=Math.max(1,...st.per_day.map(d=>d.completed+d.failed));
   setHTML('#chart',st.per_day.map(d=>`<div class="col"><span class="chart-value">${d.completed+d.failed}</span><div class="bars"><div class="bar" style="height:${Math.round(d.completed/max*75)}px;background:var(--accent)" title="${esc(d.day)} 完成 ${d.completed}"></div><div class="bar" style="height:${Math.round(d.failed/max*75)}px;background:#74747e" title="${esc(d.day)} 失败 ${d.failed}"></div></div><div class="lbl">${esc(d.day)}</div></div>`).join(''));
-  setHTML('#perAccount',table(['账号','状态','剩余积分'],st.per_account.slice(0,4).map(a=>[`<span class="account-id" title="${esc(a.name)}">${esc(a.name)}</span>`,groupBadge(a),`<div class="summary-credit">${Number(a.remaining)||0}</div>`])));
+  setHTML('#perAccount',table(['账号','状态','剩余条数'],st.per_account.slice(0,4).map(a=>[`<span class="account-id" title="${esc(a.name)}">${esc(a.name)}</span>`,groupBadge(a),quotaCell(a)])));
 
 }
 
@@ -66,4 +67,3 @@ function table(heads,rows,rowKeys=[]){
 async function setSched(name,on){
   try{await api('/api/admin/accounts/'+name,{method:'PATCH',body:{scheduling:on}});}catch(e){alert(dialogText`${e.message}`);}refresh();
 }
-

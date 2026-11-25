@@ -996,8 +996,8 @@ def _generate_capped_pair(*, dola, session, ctx, headers, account: str, prompt: 
                 left = credits.left if credits is not None else None
                 if left is not None and left < need:
                     raise PureApiError(
-                        f"{account} 第 {index} 段只出了 {seconds or 0:.1f} 秒，账号今日只剩 {left} 点，"
-                        f"补第 {nxt} 段要 {need} 点，拼不出 30 秒")
+                        f"{account} 第 {index} 段只出了 {seconds or 0:.1f} 秒，聊天模式剩余条数不足，"
+                        f"无法补第 {nxt} 段并拼成 30 秒视频")
                 _emit_note_text(on_poll, f"30 秒：第 {index} 段只出了 {seconds or 0:.1f} 秒，补第 {nxt} 段再拼接")
                 acknowledge(nxt, submit(nxt, whole=False))
         return _concat_videos(parts, Path(output_path))

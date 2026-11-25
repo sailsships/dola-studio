@@ -1,6 +1,6 @@
 # API 路由源码索引
 
-源码核对基线：`ca41dcb26376b0e1a0db35341c2881cdb124447a`。本附录由静态 AST 提取；不启动服务、不读取运行配置或数据库。
+源码核对基线：`6063f2a59291620ce3eaff196d2ba91b17f77ab1`。本附录由静态 AST 提取；不启动服务、不读取运行配置或数据库。
 
 [返回完整项目解说](../PROJECT-GUIDE.zh-CN.md)。源码行号对应生成时的文件；后续修改后应重新生成。
 
@@ -98,11 +98,11 @@
 | DELETE | `/api/admin/videos/{task_id}` | `admin_video_delete` | 管理会话：X-Admin-Key | [server.py:4787](../../server.py#L4787) |
 | POST | `/api/admin/tasks/delete-batch` | `admin_task_delete_batch` | 管理会话：X-Admin-Key | [server.py:4798](../../server.py#L4798) |
 | GET | `/api/admin/stats` | `admin_stats` | 管理会话：X-Admin-Key | [server.py:4815](../../server.py#L4815) |
-| GET | `/api/admin/keys` | `admin_keys` | 管理会话：X-Admin-Key | [server.py:4831](../../server.py#L4831) |
-| POST | `/api/admin/keys` | `admin_key_create` | 管理会话：X-Admin-Key | [server.py:4853](../../server.py#L4853) |
-| PATCH | `/api/admin/keys/{key}` | `admin_key_patch` | 管理会话：X-Admin-Key | [server.py:4866](../../server.py#L4866) |
-| POST | `/api/admin/keys/delete-batch` | `admin_key_delete_batch` | 管理会话：X-Admin-Key | [server.py:4889](../../server.py#L4889) |
-| DELETE | `/api/admin/keys/{key}` | `admin_key_delete` | 管理会话：X-Admin-Key | [server.py:4903](../../server.py#L4903) |
+| GET | `/api/admin/keys` | `admin_keys` | 管理会话：X-Admin-Key | [server.py:4837](../../server.py#L4837) |
+| POST | `/api/admin/keys` | `admin_key_create` | 管理会话：X-Admin-Key | [server.py:4859](../../server.py#L4859) |
+| PATCH | `/api/admin/keys/{key}` | `admin_key_patch` | 管理会话：X-Admin-Key | [server.py:4872](../../server.py#L4872) |
+| POST | `/api/admin/keys/delete-batch` | `admin_key_delete_batch` | 管理会话：X-Admin-Key | [server.py:4895](../../server.py#L4895) |
+| DELETE | `/api/admin/keys/{key}` | `admin_key_delete` | 管理会话：X-Admin-Key | [server.py:4909](../../server.py#L4909) |
 | POST | `/v1/video/contents/generations/tasks` | `ark_create_task` | 业务 API：Bearer（无有效密钥配置时匿名） | [server.py:2745](../../server.py#L2745) |
 | GET | `/v1/video/contents/generations/tasks/{task_id}` | `ark_get_task` | 业务 API：Bearer（无有效密钥配置时匿名） | [server.py:2831](../../server.py#L2831) |
 | POST | `/api/v3/contents/generations/tasks` | `ark_create_task` | 业务 API：Bearer（无有效密钥配置时匿名） | [server.py:2745](../../server.py#L2745) |

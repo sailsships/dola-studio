@@ -89,7 +89,7 @@ def test_active_groups_are_the_valid_set():
     assert bp.GROUP_ABNORMAL not in bp.ACTIVE_GROUPS
 
 
-def test_group_order_covers_all_buttons():
+def test_internal_group_order_covers_scheduler_states():
     assert set(bp.GROUP_ORDER) == {
         bp.GROUP_FULL, bp.GROUP_HALF, bp.GROUP_COOLING, bp.GROUP_BUSY,
-        bp.GROUP_RISK, bp.GROUP_PENDING, bp.GROUP_ABNORMAL}
+        bp.GROUP_RISK, bp.GROUP_PENDING, bp.GROUP_ABNORMAL, bp.GROUP_LOGIN}

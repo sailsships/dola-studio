@@ -19,8 +19,8 @@
 <link rel="preload" as="script" href="app/duration.js?v=1.0.1">
 <link rel="preload" as="script" href="app/responder.js?v=1.0.1">
 <link rel="preload" as="script" href="app/upscale.js?v=1.0.1">
-<link rel="preload" as="script" href="app/dashboard.js?v=1.0.1">
-<link rel="preload" as="script" href="app/accounts.8999cc3393c0.js?v=1.0.1">
+<link rel="preload" as="script" href="app/dashboard.8b6e46f231c0.js?v=1.0.1">
+<link rel="preload" as="script" href="app/accounts.1edefa75f90f.js?v=1.0.1">
 <link rel="preload" as="script" href="app/proxies.js?v=1.0.1">
 <link rel="preload" as="script" href="app/selection.js?v=1.0.1">
 <link rel="preload" as="script" href="app/credentials.js?v=1.0.1">
@@ -28,7 +28,7 @@
 <link rel="preload" as="script" href="app/videos.js?v=1.0.1">
 <link rel="preload" as="script" href="app/api-keys.js?v=1.0.1">
 <link rel="preload" as="script" href="app/diagnostics.js?v=1.0.1">
-<link rel="preload" as="script" href="app/creation.js?v=1.0.1">
+<link rel="preload" as="script" href="app/creation.cc8869c4636b.js?v=1.0.1">
 <link rel="preload" as="script" href="app/boot.5d8bc51e2c4e.js?v=1.0.1">
 <link rel="preload" as="script" href="app/refresh-engine.71c9bbf1c395.js?v=1.0.1">
 </head>
@@ -102,7 +102,7 @@
         <div class="draft-wrap"><label for="studioPrompt">画面描述</label><textarea id="studioPrompt" placeholder="从一个画面开始。描述光线、动作，以及镜头如何移动…"></textarea></div>
         <div class="composer-footer"><select id="studioAccount" aria-label="选择生成账号"><option value="">正在读取账号…</option></select><span class="format-note">16:9 / 15s</span><button class="btn btn-p" onclick="openStudioCreate()">继续配置 →</button></div>
       </div>
-      <div class="card capacity"><div class="panel-head"><h2>号池容量</h2><small>LIVE</small></div><div class="capacity-body"><div class="capacity-value"><strong id="capacityAvailable">—</strong><span>可用账号</span></div><div class="capacity-meter"><i id="capacityMeter" style="width:0"></i></div><dl><dt>账号总数</dt><dd id="capacityTotal">—</dd><dt>剩余积分</dt><dd id="capacityCredit">—</dd><dt>生成方式</dt><dd>聊天 / 工作</dd></dl></div><div class="capacity-note"><button onclick="switchTab('accounts')">管理账号与调度 <span>↗</span></button></div></div>
+      <div class="card capacity"><div class="panel-head"><h2>号池容量</h2><small>LIVE</small></div><div class="capacity-body"><div class="capacity-value"><strong id="capacityAvailable">—</strong><span>可用账号</span></div><div class="capacity-meter"><i id="capacityMeter" style="width:0"></i></div><dl><dt>账号总数</dt><dd id="capacityTotal">—</dd><dt>聊天15s可用</dt><dd id="capacityChat">—</dd><dt>工作15s可用</dt><dd id="capacityWork">—</dd></dl></div><div class="capacity-note"><button onclick="switchTab('accounts')">管理账号与调度 <span>↗</span></button></div></div>
     </div>
     <div class="card queue-panel"><div class="panel-head"><h3>任务轨道 <small id="queueSummary">正在读取…</small></h3><button class="section-link" onclick="switchTab('tasks')">全部任务 ↗</button></div><div id="recentLanes"><div class="empty">正在读取最近任务…</div></div></div>
     <div class="bottom-grid"><div class="card"><div class="cards" id="statCards"></div><h3 class="chart-head">近 7 日生成记录<span class="chart-legend"><i class="lg lg-ok"></i>完成<i class="lg lg-bad"></i>失败</span></h3><div class="chart" id="chart" role="img" aria-label="近七日完成和失败任务数量，每个日期可查看柱形数值"></div></div>
@@ -334,8 +334,8 @@
 <script src="app/duration.js?v=1.0.1"></script>
 <script src="app/responder.js?v=1.0.1"></script>
 <script src="app/upscale.js?v=1.0.1"></script>
-<script src="app/dashboard.js?v=1.0.1"></script>
-<script src="app/accounts.8999cc3393c0.js?v=1.0.1"></script>
+<script src="app/dashboard.8b6e46f231c0.js?v=1.0.1"></script>
+<script src="app/accounts.1edefa75f90f.js?v=1.0.1"></script>
 <script src="app/proxies.js?v=1.0.1"></script>
 <script src="app/selection.js?v=1.0.1"></script>
 <script src="app/credentials.js?v=1.0.1"></script>
@@ -343,7 +343,7 @@
 <script src="app/videos.js?v=1.0.1"></script>
 <script src="app/api-keys.js?v=1.0.1"></script>
 <script src="app/diagnostics.js?v=1.0.1"></script>
-<script src="app/creation.js?v=1.0.1"></script>
+<script src="app/creation.cc8869c4636b.js?v=1.0.1"></script>
 <script src="app/boot.5d8bc51e2c4e.js?v=1.0.1"></script>
 <script src="api-guide.js?v=1.0.1"></script>
 </body>

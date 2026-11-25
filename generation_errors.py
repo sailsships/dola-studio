@@ -96,7 +96,7 @@ class UpstreamGenerationFailed(UpstreamReplyError):
     def __init__(self, category, reply, *, code, conversation_id, retryable, not_charged):
         self.code, self.conversation_id = code, conversation_id
         self.retryable, self.not_charged = retryable, not_charged
-        charge = "上游声明未扣积分" if not_charged else "上游未说明扣费"
+        charge = "上游声明未消耗额度" if not_charged else "上游未说明额度是否消耗"
         super().__init__(category, f"{reply}（fail_code={code}，{charge}；会话 {conversation_id} 已确认结束）")
 
 

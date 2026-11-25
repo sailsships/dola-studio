@@ -18,14 +18,14 @@ async function openStudioCreate(){
 async function openNewCreation(){
   try{await loadAccounts();}catch(e){toast('账号列表读取失败，请刷新后重试');return;}
   if(!allAccounts.length){switchTab('accounts');toast('请先添加并登录账号');return;}
-  showDlg(`<h2>选择生成账号</h2><p class="gen-intro">选择账号后配置视频。开始生成会消耗该账号的真实额度。</p><label for="createAccount">生成账号</label><select id="createAccount" style="width:100%;height:40px">${allAccounts.map(a=>`<option value="${esc(a.name)}">${esc(a.name)} · ${esc(a.group||'未分组')}</option>`).join('')}</select><div class="row"><button class="btn" onclick="hide('dlg')">取消</button><button class="btn btn-p" onclick="openTestGen(q('#createAccount').value,{mode:studioMode})">继续配置</button></div>`);
+  showDlg(`<h2>选择生成账号</h2><p class="gen-intro">选择账号后配置视频。开始生成会消耗该账号的真实额度。</p><label for="createAccount">生成账号</label><select id="createAccount" style="width:100%;height:40px">${allAccounts.map(a=>`<option value="${esc(a.name)}">${esc(a.name)} · ${esc(accountState(a).label)}</option>`).join('')}</select><div class="row"><button class="btn" onclick="hide('dlg')">取消</button><button class="btn btn-p" onclick="openTestGen(q('#createAccount').value,{mode:studioMode})">继续配置</button></div>`);
 }
 async function loadDash(){
   await legacyLoadDash();
   const results=await Promise.allSettled([loadAccounts(),api('/api/admin/tasks?limit=4')]);
   if(results[0].status==='fulfilled'){
     const selected=q('#studioAccount').value;
-    setHTML('#studioAccount','<option value="">选择生成账号</option>'+allAccounts.map(a=>`<option value="${esc(a.name)}">${esc(a.name)} · ${esc(a.group||'未分组')}${a.busy?' · 忙碌':''}</option>`).join(''));
+    setHTML('#studioAccount','<option value="">选择生成账号</option>'+allAccounts.map(a=>`<option value="${esc(a.name)}">${esc(a.name)} · ${esc(accountState(a).label)}${a.busy?' · 忙碌':''}</option>`).join(''));
     q('#studioAccount').value=allAccounts.some(a=>a.name===selected)?selected:'';
     q('#studioAccount').disabled=false;
   }else{q('#studioAccount').innerHTML='<option value="">账号读取失败，请刷新</option>';q('#studioAccount').disabled=true;}
@@ -107,5 +107,3 @@ document.addEventListener('keydown',e=>{
  if(!items.length)return;const i=items.indexOf(document.activeElement);
  if(e.shiftKey&&i<=0){e.preventDefault();items.at(-1).focus();}else if(!e.shiftKey&&(i<0||i===items.length-1)){e.preventDefault();items[0].focus();}
 });
-
-

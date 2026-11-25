@@ -205,8 +205,8 @@ def test_environment_without_cloak_stays_off_and_says_why(switch_state, monkeypa
     assert view["v20_durations"] == [5, 10]
 
 
-@pytest.mark.parametrize("saved,expected", [("3", 3), ("99", 5), ("0", 1), ("x", 2), (None, 2)])
-def test_saved_concurrency_stays_in_range(switch_state, monkeypatch, saved, expected):
+@pytest.mark.parametrize("saved,expected", [("3", 3), ("99", 99), ("0", 1), ("x", 2), (None, 2)])
+def test_saved_concurrency_accepts_positive_counts(switch_state, monkeypatch, saved, expected):
     monkeypatch.setattr(config, "WORK_15S_CONCURRENCY", 2)
     assert wr.apply_saved(None, saved)["concurrency"] == expected
 
@@ -261,6 +261,10 @@ def _work_pool(tmp_path, monkeypatch, names):
     monkeypatch.setattr(config, "WORK_15S_ENABLED", True)
     monkeypatch.setattr(config, "EGRESS_PRECHECK", False)
     bp._has_bound_proxy = lambda name: True
+    # These scheduling tests supply a fake generation agent, without network access.
+    async def verified_login(name, **kwargs):
+        return {"ok": True, "probed": False}
+    monkeypatch.setattr(bp, "probe_hello_async", verified_login)
     for n in names:
         bp._conn.execute("UPDATE accounts_meta SET source='login' WHERE name=?", (n,))
     bp._conn.commit()

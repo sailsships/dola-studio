@@ -2220,7 +2220,7 @@ class BrowserPool:
             out.append("该号的工作模式免费额度尚未恢复")
         remaining = int(row.get("remaining") or 0)
         if need and remaining < need:
-            out.append(f"该号今日额度不够（剩 {remaining} 点，这条至少要 {need} 点）")
+            out.append("该号聊天模式剩余条数不足，无法生成所选视频；请等待每日额度恢复或选择其他模式")
         return out
 
     async def test_generate(self, account: str, prompt: str, ratio: str | None = None,
@@ -3082,13 +3082,9 @@ class BrowserPool:
                 if (not picked and short_seen and not throttle_wait and not waiting_possible and not temporary_reason
                         and not tried_order):
                     # 号都在、只是今日余额都不够这一单：等下去要等到明天额度重置，直接说清楚
-                    best = max((a["remaining"] for a in self.list_accounts()
-                                if self._schedulable(a)), default=0)
                     raise RuntimeError(
-                        f"号池里没有号付得起这一单：{model} {duration} 秒上游要扣 {cost} 点"
-                        f"（需要剩余 ≥ {need} 点的号），"
-                        f"可用账号今日最多只剩 {best} 点（每日 {DAILY_LIMIT} 点，"
-                        f"{reset_clock_text()}重置）；可改用更短时长或 seedance-2.0-fast")
+                        f"当前账号的聊天额度均不足以生成 {model} {duration} 秒视频；"
+                        f"{reset_clock_text()}恢复，可选择其他模式、模型或时长")
                 if non_pure and not non_pure_announced:
                     non_pure_announced = True
                     print(f"[pool] 30 秒两段拼接只走纯 API（Cookie 导入的号），跳过浏览器登录号："
@@ -3097,7 +3093,7 @@ class BrowserPool:
                         and not group_wait and not self._has_pure_candidate(cost)):
                     # 以前这里会静默空转到任务时限（2026-10-14 HK：只剩 Google 登录号，30 秒单卡在排队）
                     raise RuntimeError(
-                        f"30 秒两段拼接只能用 Cookie 导入的号（纯 API），且要剩余 ≥ {cost} 点："
+                        "30 秒两段拼接需要 Cookie 导入的账号（纯 API），且剩余条数足够完成拼接："
                         f"现在没有这样的号可派"
                         + (f"（{'、'.join(non_pure)} 是浏览器登录号，不能接）" if non_pure else "")
                         + "；可改用 15 秒以内，或等每日额度重置")
@@ -3157,7 +3153,7 @@ class BrowserPool:
                                 group_deadline = time.time() + config.V20_WAIT_SECONDS
                                 print(f"[pool] {model} 暂无符合额度要求的账号，先排队等待"
                                      f"（上限 {waited} 分钟）", flush=True)
-                            say(f"排队中：暂无剩余 ≥ {cost} 点、能接 {model} {duration} 秒的号，最多等 {waited} 分钟")
+                            say(f"排队中：暂无剩余条数足够生成 {model} {duration} 秒视频的账号，最多等 {waited} 分钟")
                             if time.time() < group_deadline:
                                 await asyncio.sleep(GROUP_WAIT_STEP)
                                 continue
@@ -3176,7 +3172,7 @@ class BrowserPool:
                     break
             if self.all_accounts_quota_blocked:
                 raise AllAccountsQuotaBlockedError(
-                    f"429: 所有已开启调度的账号均已知积分不足: {last_err or '无号'}"
+                    f"429: 已开启调度的账号剩余条数均不足以生成所选视频: {last_err or '无可用账号'}"
                 )
             if self.all_accounts_limited:
                 raise AllAccountsLimitedError(
@@ -3185,8 +3181,7 @@ class BrowserPool:
             if group_wait:
                 # 池子没到「全池上限/积分不足」，但符合本次模型额度要求的号一个都没有
                 waited = int(config.V20_WAIT_SECONDS // 60)
-                need = (f"【{GROUP_FULL}】账号（每条 {cost} 点）" if cost >= 3
-                        else f"剩余 ≥ {cost} 点的账号（每条 {cost} 点）")
+                need = "账号（需要该模式的剩余条数足够完成本次生成）"
                 raise AllAccountsGroupEmptyError(
                     f"{f'排队 {waited} 分钟仍' if waited and config.V20_WAIT_SECONDS > 0 else ''}"
                     f"没有可用的{need}，{model} 暂时无法开工，请稍后重试"
@@ -3212,7 +3207,7 @@ class BrowserPool:
             if busy_timeout and last_err is None and not picked:
                 raise RuntimeError(
                     "能接这一单的号都在出片中，排队到任务时限仍未空出；请稍后重试"
-                    f"（{model} {duration} 秒要扣 {cost} 点，只有剩余 ≥ {cost} 点的号能接）")
+                    f"（当前请求：{model} {duration} 秒）")
             now = time.time()
             throttled = [a for a in self.list_accounts()
                          if str(a.get("abnormal_reason") or "").startswith(self.THROTTLE_REASON_PREFIX)

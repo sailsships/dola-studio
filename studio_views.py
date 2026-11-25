@@ -27,6 +27,27 @@ def account_video_quota(account, *, chat_cost, chat_start, now):
     return {'chat_15s_remaining': chat, 'work_15s_remaining': work}
 
 
+def account_mode_capacity(accounts):
+    """Sum mode counts for idle, verified accounts with scheduling enabled."""
+    available = chat = work = 0
+    for account in accounts:
+        if (not account.get('scheduling') or account.get('busy')
+                or account.get('login_ok') != 1 or account.get('login_in_progress')
+                or account.get('risk_control') or account.get('duplicate_of')
+                or account.get('group') in ('风控', '异常', '待激活', '登录处理中')):
+            continue
+        if account.get('site') == 'doubao':
+            available += int(not account.get('rate_limited') and not account.get('quota_blocked')
+                             and int(account.get('remaining') or 0) > 0)
+            continue
+        daily = max(0, int(account.get('chat_15s_remaining') or 0))
+        weekly = max(0, int(account.get('work_15s_remaining') or 0))
+        chat += daily
+        work += weekly
+        available += int(daily > 0 or weekly > 0)
+    return {'available_accounts': available, 'chat_15s_available': chat, 'work_15s_available': work}
+
+
 def download_bytes(directory):
     total=0
     try:

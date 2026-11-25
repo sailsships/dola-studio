@@ -81,11 +81,11 @@ function searchHit(kind,...fields){
 }
 function searchQS(kind){return SEARCH[kind]?'&q='+encodeURIComponent(SEARCH[kind]):'';}
 function searchEmpty(kind,n){return SEARCH[kind]&&!n?'<div class="hint" style="margin:10px 0">没有匹配「'+noTr(SEARCH[kind])+'」的结果</div>':'';}
-let groupFilterVal='all';   // all / valid / 满额 / 半额 / 冷却 / 生成中 / 风控 / 待激活 / 异常
+let groupFilterVal='all';
 
-const GROUP_STYLE={'满额':'b-green','半额':'b-blue','冷却':'b-orange','生成中':'b-blue',
+const GROUP_STYLE={'正常':'b-green','生成中':'b-blue','登录失效':'b-red',
                    '登录处理中':'b-blue','加号中':'b-blue','加号失败':'b-red','风控':'b-red','待激活':'b-gray','异常':'b-red'};
-const GROUP_ACTIVE=['满额','半额','冷却','生成中'];
+const GROUP_ACTIVE=['正常','生成中'];
 function loginDisplayAccount(a){
   if(a.login_in_progress||a.operation==='verifying'||pendingVerifications.has(a.name))return {...a,login_in_progress:true,group:'登录处理中',group_reason:a.operation_phase||'正在检查登录状态，等待最终结果'};
   const task=pendingGenerations.get(a.name);
@@ -93,21 +93,15 @@ function loginDisplayAccount(a){
 }
 function loginDisplaySnapshot(data){
   const accounts=data.accounts.map(loginDisplayAccount),groups={};
-  for(const a of accounts)groups[a.group]=(groups[a.group]||0)+1;
-  const ready=accounts.filter(a=>GROUP_ACTIVE.includes(a.group));
-  return {...data,accounts,groups,valid_count:ready.length,remaining_points:ready.reduce((n,a)=>n+(Number(a.remaining)||0),0)};
+  for(const a of accounts){const status=accountState(a).label;groups[status]=(groups[status]||0)+1;}
+  return {...data,accounts,groups,valid_count:accounts.filter(a=>GROUP_ACTIVE.includes(accountState(a).label)).length};
 }
 function addJobDisplaySnapshot(data,jobs){
   const accounts=[],known=new Set();
-  const groups={...(data.groups||{})};
-  let valid=data.valid_count||0,points=data.remaining_points||0;
-  groups['加号中']=0;groups['加号失败']=0;
   for(const x of data.accounts){
     const job=(jobs||{})[x.name];
     const incomplete=!x.busy&&!x.email&&['','login'].includes(x.source||'')&&x.login_ok!==1;
     if(job&&job.kind==='add'&&(['running','cancelling'].includes(job.status)||(job.status==='failed'&&incomplete))){
-      groups[x.group]=Math.max(0,(groups[x.group]||0)-1);
-      if(GROUP_ACTIVE.includes(x.group)){valid=Math.max(0,valid-1);points=Math.max(0,points-(Number(x.remaining)||0));}
       continue;
     }
     accounts.push(x);known.add(x.name);
@@ -117,21 +111,31 @@ function addJobDisplaySnapshot(data,jobs){
     const group=job.status==='failed'?'加号失败':'加号中';
     accounts.push({name,email:job.email||'',source:job.source||'login',site:job.site||'dola',
       group,group_reason:job.stage||job.error||'',created_at:job.started_at||0,
-      scheduling:false,remaining:0,add_job:job});
-    known.add(name);groups[group]++;
+      scheduling:false,add_job:job});
+    known.add(name);
   }
   const displayGroups={};
-  for(const x of accounts)displayGroups[x.group]=(displayGroups[x.group]||0)+1;
-  const ready=accounts.filter(x=>GROUP_ACTIVE.includes(x.group));
+  for(const x of accounts){const status=accountState(x).label;displayGroups[status]=(displayGroups[status]||0)+1;}
+  const ready=accounts.filter(x=>GROUP_ACTIVE.includes(accountState(x).label));
   return {...data,accounts,groups:displayGroups,all_count:accounts.length,
-    valid_count:ready.length,remaining_points:ready.reduce((n,x)=>n+(Number(x.remaining)||0),0)};
+    valid_count:ready.length};
+}
+/** Account health is independent of either mode's remaining allowance. */
+function accountState(account){
+  const a=loginDisplayAccount(account);
+  if(a.group==='加号中'||a.group==='加号失败')return {label:a.group,reason:a.group_reason||''};
+  if(a.login_in_progress||a.operation==='verifying')return {label:'登录处理中',reason:a.operation_phase||'正在检查登录状态，等待最终结果'};
+  if(a.risk_control)return {label:'风控',reason:a.risk_reason||'账号需要重新验证'};
+  if(a.login_ok===0)return {label:'登录失效',reason:'请重新登录并验证账号'};
+  if(a.group==='风控'||a.group==='待激活'||a.group==='异常')return {label:a.group,reason:a.group_reason||''};
+  if(a.group==='生成中'||a.operation==='generating')return {label:'生成中',reason:a.operation_phase||'正在生成视频'};
+  if(a.login_ok===1||GROUP_ACTIVE.includes(a.group)||['满额','半额','冷却'].includes(a.group))return {label:'正常',reason:''};
+  return {label:'待激活',reason:'请先验证账号登录状态'};
 }
 function groupBadge(a){
-  a=loginDisplayAccount(a);
-  const g=a.group||'';
-  if(!g)return '<span class="tiny">—</span>';
-  return '<span class="badge '+(GROUP_STYLE[g]||'b-gray')+'" title="'+esc(a.group_reason||g)+'">'+esc(g)+'</span>'
-    +(a.group_reason?'<div class="tiny">'+esc(a.group_reason)+'</div>':'');
+  const {label,reason}=accountState(a);
+  return '<span class="badge '+(GROUP_STYLE[label]||'b-gray')+'" title="'+esc(reason||label)+'">'+esc(label)+'</span>'
+    +(reason?'<div class="tiny">'+esc(reason)+'</div>':'');
 }
 function renderGroupBar(d,container,jump){
   const g=d.groups||{};
@@ -144,19 +148,18 @@ function renderGroupBar(d,container,jump){
   const sep='<span class="sep"></span>';
   setHTML(container||'#groupBar',
     btn('all','全部',d.all_count||0,'显示全部账号（含排队、加号中及加号失败）')+
-    btn('valid','有效',d.valid_count||0,'正常组：满额+半额+冷却+生成中')+sep+
-    btn('满额','满额',n('满额'),'剩余 4 点：按模型和时长所需额度派发')+
-    btn('半额','半额',n('半额'),'剩余 2～3 点：按模型和时长所需额度派发')+
-    btn('冷却','冷却',n('冷却'),'剩余 0/1 点：不派发，每日额度刷新后回满额')+
+    btn('valid','有效',d.valid_count||0,'登录正常或正在生成的账号；剩余条数单独显示')+sep+
+    btn('正常','正常',n('正常'),'账号登录正常，模式额度请查看剩余条数')+
     btn('生成中','生成中',n('生成中'),'正在出片')+sep+
     btn('加号中','加号中',n('加号中'),'包含排队及正在登录的账号')+
     btn('加号失败','加号失败',n('加号失败'),'尚未完成添加，可重试或删除')+
     btn('登录处理中','登录处理中',n('登录处理中'),'验证及重新登录尚未结束，不计入风控')+
+    btn('登录失效','登录失效',n('登录失效'),'需要重新登录并验证')+
     btn('风控','风控',n('风控'),'发你好不回复或被登出：永久停留，需人工恢复')+
     btn('待激活','待激活',n('待激活'),'新号，尚未完成首次激活探测')+
     btn('异常','异常',n('异常'),'派发后 5 分钟无回执，到期自动恢复')+sep+
-    (work15On()&&d.accounts?'<span class="gbtn points" title="2.0 的 15 秒（工作模式）：每号每 7 天 1 条，和每日点数分开">'
-      +'15 秒可用 <b>'+workReadyCount(d.accounts)+'</b> 条</span>':''));
+    (d.accounts?'<span class="gbtn" title="登录正常、已开启调度且空闲的账号中，工作模式可用的条数">'
+      +'工作15s可用 <b>'+workReadyCount(d.accounts)+'</b> 条</span>':''));
   moveGroupInd(q(container||'#groupBar'));
 }
 /** 出口显示名（HTML）：直连 / 绑定的代理名 + host:port（egress 本身已去掉代理凭据）。 */
@@ -207,8 +210,9 @@ function setGroupFilter(key){groupFilterVal=key;accPage=1;renderAccounts();}
 function setGroupFilterGo(key){groupFilterVal=key;accPage=1;switchTab('accounts');}
 function matchGroup(x){
   if(groupFilterVal==='all')return true;
-  if(groupFilterVal==='valid')return GROUP_ACTIVE.indexOf(x.group)>=0;
-  return x.group===groupFilterVal;
+  const status=accountState(x).label;
+  if(groupFilterVal==='valid')return GROUP_ACTIVE.includes(status);
+  return status===groupFilterVal;
 }
 
 function srcBadge(x){
@@ -239,9 +243,7 @@ function sameLoginNote(x){
 function quotaCell(x,unit){
   if(x.site==='doubao')
     return '<span class="tiny">今日已出 </span><b>'+(x.used_today||0)+'</b><span class="tiny"> 条（豆包按上游额度）</span>';
-  const points=`每日点数：${x.remaining} / ${x.limit}`+
-    (x.credit_balance==null?'':`；上游余额：${x.credit_balance}`);
-  return workQuotaLine(x)+`<div class="tiny" title="${esc('聊天15s额度每天北京时间08:00更新；'+points)}">聊天15s：剩余${quotaCount(x.chat_15s_remaining)}条</div>`;
+  return workQuotaLine(x)+`<div class="tiny" title="聊天15s额度每天北京时间08:00更新">聊天15s：剩余${quotaCount(x.chat_15s_remaining)}条</div>`;
 }
 /** Weekly work quota is independent of daily chat points and the legacy auto-mode switch. */
 function work15On(){return (TEST_GEN_DURATIONS['seedance-2.0-fast']||[]).includes(15);}
@@ -256,7 +258,7 @@ function workQuotaLine(x){
     (used?`<div class="tiny">${fmt(x.work_blocked_until)} 恢复</div>`:'');
 }
 function workReadyCount(accounts){
-  return (accounts||[]).filter(x=>x.site!=='doubao'&&x.scheduling&&!x.busy&&x.login_ok!==0
+  return (accounts||[]).filter(x=>x.site!=='doubao'&&x.scheduling&&!x.busy&&x.login_ok===1&&!x.duplicate_of
     &&!x.login_in_progress&&!['登录处理中','风控','待激活','异常'].includes(x.group)&&!workUsed(x)).length;
 }
 function loadAccounts(){
@@ -311,8 +313,8 @@ function renderAccounts(){
   const sorted=[...a.accounts].sort((x,y)=>compareAccounts(x,y,accSort));
   filteredAccounts=sorted.filter(x=>
     (srcFilterVal==='all'||x.source===srcFilterVal)&&matchGroup(x)
-    &&searchHit('accounts',x.name,x.email,x.note,x.proxy_name,x.effective_egress,x.exit_ip,x.group,
-                x.group_reason,x.source==='cookie'?'Cookie 载入':x.source==='apple'?'Apple 登录':'账号登录',x.site==='doubao'?'豆包 doubao':'dola'));
+    &&searchHit('accounts',x.name,x.email,x.note,x.proxy_name,x.effective_egress,x.exit_ip,
+                accountState(x).label,accountState(x).reason,x.source==='cookie'?'Cookie 载入':x.source==='apple'?'Apple 登录':'账号登录',x.site==='doubao'?'豆包 doubao':'dola'));
   filteredNames=filteredAccounts.map(x=>x.name);
   // 被筛掉/已删除的账号不再保留勾选，避免「删除选中」误删看不见的号
   for(const n of [...selAccounts])if(!filteredNames.includes(n))selAccounts.delete(n);
@@ -350,7 +352,7 @@ function renderAccounts(){
   scheduleAddJobPoll(jobs,new Set(allAccountNames));
   setHTML('#accountsTable',table(
     ['<input type="checkbox" id="selAll" onchange="toggleAll(this.checked)" title="全选=当前筛选结果的全部账号（跨页保持）">',
-     accSortHead('name','内部账号'),accSortHead('email','名称'),'组','运行','来源','调度','剩余额度','最近使用',accSortHead('created','创建时间'),'备注','操作'],rows,pageSlice().map(x=>x.name))
+     accSortHead('name','内部账号'),accSortHead('email','名称'),'账号状态','运行','来源','调度','剩余额度','最近使用',accSortHead('created','创建时间'),'备注','操作'],rows,pageSlice().map(x=>x.name))
     +accPager(accTotalPages));
   updateSelButtons();
 }
@@ -495,7 +497,7 @@ async function recoverAccount(name,kind){
   try{
     const r=await api('/api/admin/accounts/'+encodeURIComponent(name)+'/recover',
       {method:'POST',body:{kind:kind}});
-    alert(dialogText`${name} 已恢复，当前分组：${(r.account&&r.account.group)||'-'}`);
+    alert(dialogText`${name} 已恢复，当前状态：${r.account?accountState(r.account).label:'待验证'}`);
   }catch(e){return alert(dialogText`${e.message}`);}
   refresh();
 }
@@ -794,7 +796,7 @@ async function pollProbeBatch(jobId){
   prog.textContent=`进度 ${j.done}/${j.total}（${pct}%）  通过 ${j.ok_count||0}  未通过(进风控) ${j.failed_count||0}  未完成 ${j.skipped_count||0}`
     +(j.current?`\n当前：${j.current}`:'')+(j.status==='completed'?'\n已完成 ':'');
   out.textContent=(j.results||[]).slice().reverse()
-    .map(x=>`${x.ok===true?'':(x.ok===false?'':'–')} ${x.name}  [${x.group||'-'}]  ${x.message||''}`
+    .map(x=>`${x.ok===true?'':(x.ok===false?'':'–')} ${x.name}  [${accountState({...allAccounts.find(a=>a.name===x.name),...x}).label}]  ${x.message||''}`
       +(x.reply?`  回复：${x.reply}`:''))
     .join('\n');
   if(j.status!=='running'){stopProbePoll();refresh();}
@@ -848,7 +850,7 @@ async function submitBatchProxy(){
 }
 
 async function resetAllQuotas(){
-  if(!await confirm('立即重置全池额度？\n所有因「每日上限 / 积分不足 / 失败」被挡的账号会恢复调度与积分缓存。\n（不等同于风控冷却，风控账号仍需重新登录）'))return;
+  if(!await confirm('立即重新检查账号额度？\n将清除每日额度的本地限制记录，实际可生成条数仍以上游回执为准；不会增加上游额度或重置工作模式的7天周期。\n登录失效或风控账号仍需重新登录验证。'))return;
   try{const r=await api('/api/admin/accounts/reset-quotas',{method:'POST'});alert(`已重置 ${r.reset} 个账号的额度`);}
   catch(e){alert(dialogText`${e.message}`);}
   refresh();

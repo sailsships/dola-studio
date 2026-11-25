@@ -737,7 +737,7 @@ async def _preflight_balance(page, ms_token: str, fp: str, required: int) -> dic
             raise AccountLimitedError(f"账号每日生成上限: {source[:120]}")
         if balance is not None and balance < required:
             raise CreditInsufficientError(
-                f"生成前积分不足: 当前 {balance}，本次至少需要 {required}（来源: {source[:120]}）"
+                "生成前额度不足：该账号无法生成所选视频，请等待额度恢复或选择其他模式"
             )
         return {"balance": balance, "source": source}
     except (AccountLimitedError, CreditInsufficientError):

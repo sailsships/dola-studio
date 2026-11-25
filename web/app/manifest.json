@@ -10,8 +10,8 @@
     "app/duration.js",
     "app/responder.js",
     "app/upscale.js",
-    "app/dashboard.js",
-    "app/accounts.8999cc3393c0.js",
+    "app/dashboard.8b6e46f231c0.js",
+    "app/accounts.1edefa75f90f.js",
     "app/proxies.js",
     "app/selection.js",
     "app/credentials.js",
@@ -19,7 +19,7 @@
     "app/videos.js",
     "app/api-keys.js",
     "app/diagnostics.js",
-    "app/creation.js",
+    "app/creation.cc8869c4636b.js",
     "app/boot.5d8bc51e2c4e.js"
   ]
 }
