@@ -73,7 +73,7 @@ def account_bundle(accounts_dir: Path, name: str, profile_subdir: str) -> dict:
         cookies[-1].setdefault("path", "/")
     if not cookies:
         raise CookieExportError("快照中没有可导出的 Dola/豆包 Cookie（可能已退出登录）")
-    return {"format": "dola-pool-cookies-v1", "account": name,
+    return {"format": "dola-studio-cookies-v1", "account": name,
             "source": source, "cookies": cookies}
 
 
@@ -106,4 +106,4 @@ def build_export(accounts_dir: Path, names: list[str], profile_subdir: str):
             "exported": [b["account"] for b in bundles], "failed": failed,
             "note": "Saved cookies only, not a live login check. Import the account JSON files, not this manifest.",
         }))
-    return output.getvalue(), "application/zip", "dola-account-cookies.zip", len(bundles), len(failed)
+    return output.getvalue(), "application/zip", "dola-studio-cookies.zip", len(bundles), len(failed)

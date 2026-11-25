@@ -12,9 +12,9 @@ ok(){ printf '\033[32m[✓]\033[0m %s\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行：sudo bash $0"
 DOLA_DIR="${DOLA_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-DOLA_SERVICE="${DOLA_SERVICE:-dola-pool}"
-DOLA_REPO_SLUG="${DOLA_REPO_SLUG:-Roins-hub/dola-pool}"
-[ -f "$DOLA_DIR/server.py" ] || die "$DOLA_DIR 不是 dola-pool 目录"
+DOLA_SERVICE="${DOLA_SERVICE:-dola-studio}"
+DOLA_REPO_SLUG="${DOLA_REPO_SLUG:-sailsships/dola-studio}"
+[ -f "$DOLA_DIR/server.py" ] || die "$DOLA_DIR 不是 Dola Studio 目录"
 systemctl cat "$DOLA_SERVICE" >/dev/null 2>&1 || die "systemd 里没有服务 $DOLA_SERVICE（用 DOLA_SERVICE=xxx 指定）"
 command -v python3 >/dev/null || die "缺少 python3"
 
@@ -46,14 +46,14 @@ SVC_USER=$SVC_USER
 UPDATE_DIR=$UPDATE_DIR
 HEALTH_URL=http://127.0.0.1:$PORT/health
 REPO=$DOLA_REPO_SLUG
-BACKUP_DIR=/opt/dola-pool-backups
+BACKUP_DIR=/opt/dola-studio-backups
 AGENT_COPY=$LIB/updater.sh
 EOF
 chmod 644 "$CONF"
 
 cat > "/etc/systemd/system/${DOLA_SERVICE}-updater.service" <<EOF
 [Unit]
-Description=dola-pool one-click update (triggered from the admin panel)
+Description=Dola Studio one-click update (triggered from the admin panel)
 
 [Service]
 Type=oneshot
@@ -63,7 +63,7 @@ TimeoutStartSec=1800
 EOF
 cat > "/etc/systemd/system/${DOLA_SERVICE}-updater.path" <<EOF
 [Unit]
-Description=Watch for dola-pool one-click update requests
+Description=Watch for Dola Studio one-click update requests
 
 [Path]
 PathExists=$UPDATE_DIR/ready

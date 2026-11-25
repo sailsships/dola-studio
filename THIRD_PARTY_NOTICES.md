@@ -1,8 +1,8 @@
 # Third-party notices
 
-The base project is derived from https://github.com/Roins-hub/dola-pool (MIT, Copyright (c) 2026 Roins-hub and contributors). Its complete original license is retained in LICENSE.
+The base project is third-party MIT-licensed software, Copyright (c) 2026 Roins-hub and contributors. Its complete original license is retained in LICENSE. The original repository identity and source references are preserved in the [original source notices](https://github.com/sailsships/dola-studio/blob/7212e56e14c8b695e1c51e102ccf224a61ae1814/THIRD_PARTY_NOTICES.md).
 
-Protocol/signature compatibility portions include code derived from dola-pool-cookie; pure_api_gen.py also includes adaptations from stable-dola-pool 2.1.22. Their existing notices and license requirements continue to apply.
+Protocol/signature compatibility portions include code derived from a third-party Cookie protocol implementation; pure_api_gen.py also includes adaptations from the third-party stable account-pool edition 2.1.22. The exact source identifiers remain available in the original source notices linked above. Their existing notices and license requirements continue to apply; these portions are not claimed as Dola Studio originals.
 
 Bundled third-party assets retain their existing notices in protocol/js/bdms-sdk.js and extensions, where present. Their inclusion does not transfer authorship to the custom project.
 

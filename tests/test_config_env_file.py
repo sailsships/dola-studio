@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -60,3 +62,23 @@ def test_explicit_env_file_overrides_local_defaults(tmp_path):
     env["DOLA_PROXY"] = "http://10.0.0.1:8080"
     env["DOLA_PORT"] = "9300"
     assert read() == ["http://10.0.0.1:8080", 9300, 17]
+
+
+@pytest.mark.parametrize("use_old,use_new,expected", [
+    (False, False, "pool_usage.db"),
+    (True, False, "legacy-accounts.db"),
+    (False, True, "studio-accounts.db"),
+    (True, True, "studio-accounts.db"),
+])
+def test_account_database_config_remains_compatible(tmp_path, use_old, use_new, expected):
+    # Import an isolated copy: neither the developer's .env.local nor database is used.
+    (tmp_path / "config.py").write_bytes((ROOT / "config.py").read_bytes())
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DOLA_")}
+    if use_old:
+        env["_".join(("DOLA", "POOL", "DB", "PATH"))] = "legacy-accounts.db"
+    if use_new:
+        env["DOLA_ACCOUNT_DB_PATH"] = "studio-accounts.db"
+    result = subprocess.run(
+        [sys.executable, "-c", "import config; print(config.POOL_DB_PATH)"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == expected

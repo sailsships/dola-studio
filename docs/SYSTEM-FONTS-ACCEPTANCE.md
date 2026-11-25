@@ -2,6 +2,8 @@
 
 日期：2026-11-25。静态样式构建：`20261125-system-type-1`。
 
+本文记录当时的字体验收；1.0.1 后续统一了前端资源版本。文中的备份仅展示 `backups/` 相对路径，原根目录已脱敏，未迁移生产目录。恢复时须查阅[完整历史记录](https://github.com/sailsships/dola-studio/blob/c0bc8ac5cfe198f2b4630a7e4a29f75196178fa9/docs/SYSTEM-FONTS-ACCEPTANCE.md)及原始备份 manifest。
+
 ## 已完成
 
 - 自研代码署名继续统一为 Dola Studio，未将第三方代码来源改写为自研。
@@ -34,4 +36,4 @@
 
 ## 恢复
 
-线上备份：`/opt/dola-pool/backups/studio-system-fonts-20261125-070645`，包含所有被移除字体、许可及修改前的样式和文件清单。若恢复字体，应连同原字体许可和对应 CSS 一并恢复，不单独还原字体二进制。
+线上备份：`backups/studio-system-fonts-20261125-070645`，包含所有被移除字体、许可及修改前的样式和文件清单。若恢复字体，应连同原字体许可和对应 CSS 一并恢复，不单独还原字体二进制。

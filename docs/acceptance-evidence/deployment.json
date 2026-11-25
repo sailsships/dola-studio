@@ -1,6 +1,6 @@
 {
   "deployed": true,
-  "backup": "/opt/dola-pool/backups/studio-live-fix-20261125-015055",
+  "backup": "backups/studio-live-fix-20261125-015055",
   "healthOk": true,
   "files": {
     "browser_video_params.py": "7e4795086d65cad76fc76c039b7997cf5d67bf38622a4418dfffea142c7926c3",
@@ -11,5 +11,7 @@
     "THIRD_PARTY_NOTICES.md": "3701fa22e9fec6c980804a775b36121c98cf44d3c041dc8e0b829a5498c02281"
   },
   "originalLicensePreserved": true,
-  "idleAtRestart": true
+  "idleAtRestart": true,
+  "backupPathRedacted": true,
+  "originalRecord": "https://github.com/sailsships/dola-studio/blob/c0bc8ac5cfe198f2b4630a7e4a29f75196178fa9/docs/acceptance-evidence/deployment.json"
 }

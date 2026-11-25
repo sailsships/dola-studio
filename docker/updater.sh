@@ -1,8 +1,8 @@
 #!/bin/sh
-# dola-pool 一键更新程序（Docker）。在 docker-compose.yml 的 updater 服务里运行（docker:27-cli 镜像，
+# Dola Studio 一键更新程序（Docker）。在 docker-compose.yml 的 updater 服务里运行（docker:27-cli 镜像，
 # 挂 /var/run/docker.sock 和项目目录）。每 3 秒检查一次 /data/update：
 #   app 等进行中的任务清空后写 ready → 把项目目录 .env 里的 DOLA_IMAGE_TAG 改成新版本
-#   → 备份数据库（容器内 sqlite 在线备份到 /data/backups）→ docker compose pull + up -d dola-pool
+#   → 备份数据库（容器内 sqlite 在线备份到 /data/backups）→ docker compose pull + up -d dola-studio
 #   → 等 /health 报出新版本号；失败就把 DOLA_IMAGE_TAG 改回原值并重新 up，回到原版本。
 # 进度写 /data/update/agent-status.json（面板显示），心跳写 /data/update/agent.json。
 # 注意：挂 docker.sock 等同于宿主机 root 权限；不需要一键更新可以删掉 compose 里的 updater 服务。
@@ -10,9 +10,9 @@ set -u
 
 DATA_DIR="${DATA_DIR:-/data}"
 UPDATE_DIR="$DATA_DIR/update"
-APP_SERVICE="${APP_SERVICE:-dola-pool}"
-APP_CONTAINER="${APP_CONTAINER:-dola-pool}"
-HEALTH_URL="${HEALTH_URL:-http://dola-pool:8000/health}"
+APP_SERVICE="${APP_SERVICE:-dola-studio}"
+APP_CONTAINER="${APP_CONTAINER:-dola-studio}"
+HEALTH_URL="${HEALTH_URL:-http://dola-studio:8000/health}"
 VERIFY_SECONDS="${VERIFY_SECONDS:-180}"
 IMAGE_VAR="DOLA_IMAGE_TAG"
 
@@ -121,7 +121,7 @@ PY
 
   status downloading "拉取镜像 $TO"
   set_tag "$TO"
-  if ! $DC config 2>/dev/null | grep -q "dola-pool:$TO"; then
+  if ! $DC config 2>/dev/null | grep -q "dola-studio:$TO"; then
     if [ -n "$OLD_TAG" ]; then set_tag "$OLD_TAG"; fi
     status failed "compose 文件的 image 没有使用 \${$IMAGE_VAR}，不能自动更新（未改动任何东西）"
     finish; return

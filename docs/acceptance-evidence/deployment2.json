@@ -1,10 +1,12 @@
 {
   "deployed": true,
-  "backup": "/opt/dola-pool/backups/studio-live-cooldown-20261125-020255",
+  "backup": "backups/studio-live-cooldown-20261125-020255",
   "healthOk": true,
   "files": {
     "server.py": "f661e1f269f27e2080c5231f4e65a060f74825ec15ea31c4ff9e5b06e10469ed"
   },
   "originalLicensePreserved": true,
-  "idleAtRestart": true
+  "idleAtRestart": true,
+  "backupPathRedacted": true,
+  "originalRecord": "https://github.com/sailsships/dola-studio/blob/c0bc8ac5cfe198f2b4630a7e4a29f75196178fa9/docs/acceptance-evidence/deployment2.json"
 }

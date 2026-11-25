@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dola-pool 一键更新程序（源码部署，root 运行）。
+# Dola Studio 一键更新程序（源码部署，root 运行）。
 #
 # 由 systemd 的 <服务名>-updater.path 监听 $UPDATE_DIR/ready 触发（deploy/install-updater.sh 安装），
 # 面板发起更新、app 等进行中的任务清空后才会写 ready。按 $UPDATE_DIR/request.json 里的版本：
@@ -9,19 +9,19 @@
 # request.json 和 ready，app 随即恢复派单。账号、数据库、视频、dola.env 一律不动。
 set -uo pipefail
 
-CONF="${DOLA_UPDATER_CONF:-/etc/dola-pool-updater.env}"
+CONF="${DOLA_UPDATER_CONF:-/etc/dola-studio-updater.env}"
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && . "$CONF"
 
 APP_DIR="${APP_DIR:?APP_DIR 未设置}"
-SERVICE="${SERVICE:-dola-pool}"
+SERVICE="${SERVICE:-dola-studio}"
 SVC_USER="${SVC_USER:-root}"
 UPDATE_DIR="${UPDATE_DIR:-$APP_DIR/update}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8002/health}"
-REPO="${REPO:-Roins-hub/dola-pool}"
+REPO="${REPO:-sailsships/dola-studio}"
 GIT_URL="${GIT_URL:-https://github.com/$REPO.git}"
 TARBALL_URL="${TARBALL_URL:-https://codeload.github.com/$REPO/tar.gz/refs/tags/%s}"
-BACKUP_DIR="${BACKUP_DIR:-/opt/dola-pool-backups}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/dola-studio-backups}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 VERIFY_SECONDS="${VERIFY_SECONDS:-120}"
 PY="${PY:-python3}"

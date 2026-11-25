@@ -1,37 +1,38 @@
 #!/usr/bin/env bash
-# dola-pool 一键部署脚本（Ubuntu 20.04+ / Debian 11+，x86_64 / arm64）
+# Dola Studio 部署模板（Ubuntu 20.04+ / Debian 11+，x86_64 / arm64）
 #
-# 用法一：下载 Release 包解压后，在项目目录里执行
+# 先用具备访问权限的 Git 身份克隆自有仓库，再在项目目录中执行：
+#   git clone git@github.com:sailsships/dola-studio.git
+#   cd dola-studio
 #   sudo bash deploy/install.sh
 #
-# 用法二：直接一条命令（脚本会自己从 GitHub 拉代码）
-#   curl -fsSL https://github.com/Roins-hub/dola-pool/releases/latest/download/install.sh | sudo bash
+# 本模板尚未完成从零安装验收，私有仓库暂无可直接下载的公开 Release 安装器。
 #
 # 带域名 + 自动 HTTPS（需要先把域名 A 记录解析到本机）：
-#   curl -fsSL .../install.sh | sudo DOLA_DOMAIN=video.example.com bash
+#   sudo DOLA_DOMAIN=video.example.com bash deploy/install.sh
 #
 # 可选环境变量（都有默认值）：
 #   DOLA_DOMAIN       对外域名；设置后自动装 nginx 反代 + Let's Encrypt 证书，服务只监听 127.0.0.1
 #   DOLA_EMAIL        申请证书用的邮箱（不填则不登记邮箱）
-#   DOLA_DIR          安装目录，默认 /opt/dola-pool
+#   DOLA_DIR          安装目录，默认 /opt/dola-studio
 #   DOLA_PORT         服务端口，默认 8002
-#   DOLA_SERVICE      systemd 服务名，默认 dola-pool
+#   DOLA_SERVICE      systemd 服务名，默认 dola-studio
 #   DOLA_USER         运行服务的系统用户，默认执行 sudo 的那个用户（没有则 root）
 #   DOLA_DISPLAY      Xvfb 虚拟显示编号，默认 99（和已有 Xvfb 冲突时改掉）
-#   DOLA_VERSION      用法二时拉取的 Git 标签/分支，默认 main
-#                     装好后可在管理面板「版本」里一键更新到新的正式版（deploy/install-updater.sh）
-#   DOLA_REPO         用法二时的仓库地址
+#   DOLA_VERSION      需要拉取代码时使用的 Git 标签/分支，默认 main
+#   DOLA_REPO         需要拉取代码时使用的仓库地址，私有仓库需事先配置认证
+#                     面板安装更新仍需自有 Release 产物、认证与回滚验收
 #
 # 重复执行 = 升级：会更新代码和依赖，但保留 dola.env、账号、数据库、视频等全部数据。
 set -euo pipefail
 
-DOLA_DIR="${DOLA_DIR:-/opt/dola-pool}"
+DOLA_DIR="${DOLA_DIR:-/opt/dola-studio}"
 DOLA_PORT="${DOLA_PORT:-8002}"
-DOLA_SERVICE="${DOLA_SERVICE:-dola-pool}"
+DOLA_SERVICE="${DOLA_SERVICE:-dola-studio}"
 DOLA_DOMAIN="${DOLA_DOMAIN:-}"
 DOLA_EMAIL="${DOLA_EMAIL:-}"
 DOLA_VERSION="${DOLA_VERSION:-main}"
-DOLA_REPO="${DOLA_REPO:-https://github.com/Roins-hub/dola-pool.git}"
+DOLA_REPO="${DOLA_REPO:-https://github.com/sailsships/dola-studio.git}"
 DOLA_USER="${DOLA_USER:-${SUDO_USER:-root}}"
 DOLA_DISPLAY="${DOLA_DISPLAY:-99}"
 NODE_MIN_MAJOR=16
@@ -164,7 +165,7 @@ fi
 c_info "注册 systemd 服务 ${DOLA_SERVICE} ..."
 cat > /etc/systemd/system/${DOLA_SERVICE}-xvfb.service <<EOF
 [Unit]
-Description=Xvfb virtual display for dola-pool
+Description=Xvfb virtual display for Dola Studio
 After=network.target
 
 [Service]
@@ -179,7 +180,7 @@ EOF
 
 cat > "/etc/systemd/system/${DOLA_SERVICE}.service" <<EOF
 [Unit]
-Description=dola-pool OpenAI compatible video API
+Description=Dola Studio OpenAI compatible video API
 After=network.target ${DOLA_SERVICE}-xvfb.service
 Wants=${DOLA_SERVICE}-xvfb.service
 
@@ -257,7 +258,7 @@ fi
 cat <<EOF
 
 ==================================================================
-  dola-pool 部署完成
+  Dola Studio 部署完成
 ------------------------------------------------------------------
   管理面板   ${PUBLIC_BASE}/
   默认账号   admin / admin123   ← 登录后立刻到「用户管理」改密码！
@@ -272,7 +273,7 @@ cat <<EOF
     升级版本   重新执行本脚本（数据保留）
 ------------------------------------------------------------------
   下一步：添加代理 → 添加账号 → 验证 → 测试生成
-  详细步骤见 USAGE.md：https://github.com/Roins-hub/dola-pool/blob/main/USAGE.md
+  详细步骤：https://github.com/sailsships/dola-studio/blob/main/README.md
 ==================================================================
 EOF
 if [ -z "$DOLA_DOMAIN" ]; then

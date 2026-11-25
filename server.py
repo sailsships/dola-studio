@@ -101,7 +101,7 @@ from user_store import (
 Path(config.DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 Path("web").mkdir(parents=True, exist_ok=True)
 
-APP_VERSION = "2.8.3"
+APP_VERSION = "1.0.1"
 
 app = FastAPI(title="Dola Studio", version=APP_VERSION)
 

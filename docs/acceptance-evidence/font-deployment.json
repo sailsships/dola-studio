@@ -1,6 +1,6 @@
 {
   "deployed": true,
-  "backup": "/opt/dola-pool/backups/studio-system-fonts-20261125-070645",
+  "backup": "backups/studio-system-fonts-20261125-070645",
   "serviceRestarted": false,
   "healthOk": true,
   "thirdPartyCodeNoticesPreserved": true,
@@ -13,5 +13,7 @@
     "THIRD_PARTY_NOTICES.md": "a1722f7265ac026b38ea7d9e70ad999c92e29e2dfb47ea4c1ae60d8c2ebfde88",
     "docs/ATTRIBUTION-INVENTORY.md": "3e82c02aa4d7a81ab19540cace84a595bdc957463162670b0046de8a26350292",
     "docs/TYPOGRAPHY.md": "47f67c34fcb54467b4555cc58ce86718fbdcd163d6cde1e4f9576f350904f689"
-  }
+  },
+  "backupPathRedacted": true,
+  "originalRecord": "https://github.com/sailsships/dola-studio/blob/c0bc8ac5cfe198f2b4630a7e4a29f75196178fa9/docs/acceptance-evidence/font-deployment.json"
 }

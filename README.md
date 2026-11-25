@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="#overview"><img src="https://img.shields.io/badge/Version-1.0.1-2F80ED" alt="Dola Studio 1.0.1"></a>
   <a href="#quick-start"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
   <a href="#architecture"><img src="https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white" alt="FastAPI"></a>
   <a href="#deployment"><img src="https://img.shields.io/badge/Deployment-Linux-333333?logo=linux&logoColor=white" alt="Linux source deployment"></a>
@@ -46,7 +47,7 @@ Dola Studio 是一个可自行部署的 Web 管理工具，为 Dola 和豆包提
 
 生成计算由上游服务完成；本项目承担本地管理、浏览器或协议执行、文件处理和任务调度。
 
-> **当前版本状态**：服务端版本为 `2.8.3`。两种模式各有真实 15 秒视频成功记录，关键管理交互已验收。推荐 Linux 源码部署；从零安装、完整 Docker 部署及部分扩展功能仍需补充验证，详见[验证范围](#verification)。
+> **当前版本状态**：服务端版本为 `1.0.1`。两种模式各有真实 15 秒视频成功记录，关键管理交互已验收。推荐 Linux 源码部署；从零安装、完整 Docker 部署及部分扩展功能仍需补充验证，详见[验证范围](#verification)。
 
 <a id="contents"></a>
 
@@ -487,12 +488,14 @@ JSON 可使用 `reference_images` 与 `reference_audio`。音频还需满足[素
 | 配置或目录 | 内容 |
 | --- | --- |
 | `DOLA_DB_PATH`，默认 `tasks.db` | 任务、应用设置和业务 Key |
-| `DOLA_POOL_DB_PATH`，默认 `pool_usage.db` | 账号、额度、代理、管理用户与会话等 |
+| `DOLA_ACCOUNT_DB_PATH`，默认 `pool_usage.db` | 账号、额度、代理、管理用户与会话等 |
 | `accounts/` | 账号 Cookie、profile 和登录态 |
 | `DOLA_DOWNLOAD_DIR`，默认 `downloads/` | 视频与图片作品 |
 | `DOLA_REFERENCE_FILE_DIR`，默认 `refs/` | 在途参考素材 |
 | `DOLA_THUMB_DIR`，默认 `thumbs/` | 参考图缩略图 |
 | `creds.json` 与匹配密钥 | 自动重登凭据及其解密条件 |
+
+`DOLA_ACCOUNT_DB_PATH` 是 1.0.1 的账号库配置键；仍可读取原配置键，同时存在时新键优先。源码默认文件仍为 `pool_usage.db`，Docker 入口在没有新旧配置时使用 `/data/pool_usage.db`。
 
 相对路径受服务工作目录影响。账号目录和凭据路径另有约定，不能仅调整媒体目录就认定完成了全站数据迁移。
 
@@ -548,7 +551,9 @@ Git 仓库排除了运行数据。克隆源码不会恢复线上账号、登录�
 
 更新前记录目标提交、在途任务与备份；更新后检查服务、鉴权、前端资源版本和已有作品。结果未知的上游任务应优先追踪原会话，不通过反复重启或重新生成处理。
 
-自动更新源默认未配置；历史更新脚本仍可能有原仓库默认值。尚未建立自有 release 流程前，使用已核对的手动发布方式，避免覆盖定制内容。
+自动更新源默认未配置；安装和更新脚本的默认仓库已统一为 `sailsships/dola-studio`。尚未建立完整的私有仓库 release、认证与更新验收流程，当前使用已核对的手动发布方式。
+
+1.0.1 是本产品独立版本序列的起点。旧实例若报告更高的历史版本，首次切换需手动发布；版本比较规则不会将较低编号视为自动升级。变更与验证范围见 [1.0.1 说明](docs/RELEASE-1.0.1.zh-CN.md)。
 
 <a id="verification"></a>
 

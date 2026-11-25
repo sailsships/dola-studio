@@ -28,14 +28,21 @@ def test_single_roundtrip_and_no_unrelated_secrets(tmp_path):
     data, mime, name, count, failed = build_export(tmp_path, ["acc1"], "cloak-profile")
     assert mime == "application/json" and name == "acc1.json" and (count, failed) == (1, 0)
     assert b"never-export" not in data
+    assert json.loads(data)["format"] == "dola-studio-cookies-v1"
     assert parse_cookie_header_text(data.decode())[0]["cookies_list"] == cookies
+
+    # Old exported envelopes still import with their domains, paths and values intact.
+    legacy = json.loads(data)
+    legacy["format"] = "-".join(("dola", "pool", "cookies", "v1"))
+    assert parse_cookie_header_text(json.dumps(legacy))[0]["cookies_list"] == cookies
 
 
 def test_batch_reports_partial_failure_and_keeps_names(tmp_path):
     save(tmp_path, "acc1")
     save(tmp_path, "acc2", ".dola.com")
-    data, mime, _, count, failed = build_export(tmp_path, ["acc1", "acc2", "missing"], "cloak-profile")
+    data, mime, name, count, failed = build_export(tmp_path, ["acc1", "acc2", "missing"], "cloak-profile")
     assert mime == "application/zip" and (count, failed) == (2, 1)
+    assert name == "dola-studio-cookies.zip"
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         assert set(z.namelist()) == {"acc1.json", "acc2.json", "_export/manifest.json"}
         assert json.loads(z.read("_export/manifest.json"))["failed"][0]["account"] == "missing"

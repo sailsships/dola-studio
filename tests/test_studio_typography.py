@@ -1,4 +1,5 @@
 """Keep the console independent of redistributed font assets."""
+import json
 import re
 from pathlib import Path
 
@@ -15,8 +16,9 @@ def test_stylesheets_only_use_host_fonts():
 
 def test_typography_release_invalidates_stylesheet_caches():
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    build = json.loads((ROOT / "web/app/manifest.json").read_text(encoding="utf-8"))["build"]
     for name in ("shell.css", "console.css"):
-        assert name + "?v=20261125-system-type-1" in html
+        assert name + "?v=" + build in html
 
 
 def test_no_bundled_font_files_remain():

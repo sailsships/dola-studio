@@ -2,6 +2,8 @@
 
 验收日期：2026-11-25（Asia/Shanghai）。前端构建：`20261125-live-audit-1`。
 
+本文记录当时的真实验收，不表示后续命名为 1.0.1 的源码已重新部署验收。备份路径仅展示 `backups/` 相对路径，原部署根目录已脱敏；这不表示生产目录已迁移。恢复前须查阅[完整历史记录](https://github.com/sailsships/dola-studio/blob/c0bc8ac5cfe198f2b4630a7e4a29f75196178fa9/docs/LIVE-ACCEPTANCE.md)和对应原始 manifest。
+
 ## 验收结论
 
 本轮已执行真实网页点击、真实管理接口写入与回读，以及聊天、工作两种模式的真实 15 秒视频生成。最终两条任务的数据库状态均为 `completed`，网页预览均实际播放，文件均为 1280×720、15.104 秒、H.264 视频和 AAC 音频；两个文件 SHA256 不同。18 组管理交互通过，修改相关的 55 项回归测试通过。
@@ -98,11 +100,11 @@ python -m pytest tests/test_force15_material_truth.py tests/test_logout_revocati
 
 源码发布均先核对旧文件 SHA256、备份，并确认生成、加号和登录队列空闲后重启；重启后健康恢复。源文件备份：
 
-- `/opt/dola-pool/backups/studio-live-fix-20261125-015055`
-- `/opt/dola-pool/backups/studio-live-cooldown-20261125-020255`
-- `/opt/dola-pool/backups/studio-live-completion-20261125-020948`
+- `backups/studio-live-fix-20261125-015055`
+- `backups/studio-live-cooldown-20261125-020255`
+- `backups/studio-live-completion-20261125-020948`
 
-初始数据库备份：`/opt/dola-pool/backups/live-audit-20261125-012537`。恢复应在停写且确认空闲时按对应备份 manifest 操作；不要混用不同时刻文件或盲目恢复数据库覆盖后续生产任务。最终文档与依赖清单另行备份发布，无须重启服务。
+初始数据库备份：`backups/live-audit-20261125-012537`。恢复应在停写且确认空闲时按对应备份 manifest 操作；不要混用不同时刻文件或盲目恢复数据库覆盖后续生产任务。最终文档与依赖清单另行备份发布，无须重启服务。
 
 清理已实测完成：临时管理员删除、临时 owner token 撤销且后续 401、测试密钥与代理均为零；原生产账号集合、代理集合、绑定关系保留，并发、窗口并发、超分和 AI 代答配置均与验收前一致。保留验收任务及视频文件。期间误以 root 创建的一组浏览器缓存和锁的所属关系已精确恢复，未删除账号 profile。
 

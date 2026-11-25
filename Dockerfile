@@ -1,4 +1,4 @@
-# dola-pool Docker 镜像：只跑纯 API（Cookie 导入的 dola / 豆包号），不装浏览器。
+# Dola Studio Docker 镜像：只跑纯 API（Cookie 导入的 dola / 豆包号），不装浏览器。
 # 数据（账号、数据库、成片、参考图）全部在 /data，挂成数据卷，升级镜像不丢。
 FROM python:3.12-slim
 
@@ -7,7 +7,6 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PORT=8000 \
     DOLA_DB_PATH=/data/tasks.db \
-    DOLA_POOL_DB_PATH=/data/pool_usage.db \
     DOLA_DOWNLOAD_DIR=/data/downloads \
     DOLA_REFERENCE_FILE_DIR=/data/refs \
     DOLA_THUMB_DIR=/data/thumbs \

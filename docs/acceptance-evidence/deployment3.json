@@ -1,6 +1,6 @@
 {
   "deployed": true,
-  "backup": "/opt/dola-pool/backups/studio-live-completion-20261125-020948",
+  "backup": "backups/studio-live-completion-20261125-020948",
   "healthOk": true,
   "files": {
     "server.py": "5432873b7d6a2e9a2569a34613188c7127f912903e31a86cf90fb03cbefaddcd",
@@ -11,5 +11,7 @@
     "web/app/runtime.233eaa892e34.js": "fb26485e90deaa7702868c916fabb72caa3c366fff85ac63970f7ce47d72d01a"
   },
   "originalLicensePreserved": true,
-  "idleAtRestart": true
+  "idleAtRestart": true,
+  "backupPathRedacted": true,
+  "originalRecord": "https://github.com/sailsships/dola-studio/blob/c0bc8ac5cfe198f2b4630a7e4a29f75196178fa9/docs/acceptance-evidence/deployment3.json"
 }

@@ -119,7 +119,7 @@ def test_non_git_install_updates_from_the_source_tarball(tmp_path):
     app = tmp_path / "app"
     sh(f"mkdir -p {app} && git -C {origin} archive v1.0.0 | tar -x -C {app}")
     (app / "dola.env").write_text("DOLA_SECRET=keep\n")
-    sh(f"git -C {origin} archive --prefix=dola-pool-1.1.0/ v1.1.0 | gzip > {tmp_path}/v1.1.0.tgz")
+    sh(f"git -C {origin} archive --prefix=dola-studio-1.1.0/ v1.1.0 | gzip > {tmp_path}/v1.1.0.tgz")
     env = make_env(tmp_path, app, origin, TARBALL_URL=f"file://{tmp_path}/%s.tgz")
     result = run_updater(env)
     status = agent_status(tmp_path)

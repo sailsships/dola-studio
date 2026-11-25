@@ -42,13 +42,15 @@ Dola Studio 是一个管理 Dola、豆包账号、代理与生成任务的 Web �
 | 名称 | 当前含义 |
 | --- | --- |
 | Dola Studio | 本定制版本的产品与自研贡献署名 |
-| 服务端 `APP_VERSION` | 当前源码为 `2.8.3` |
-| 前端 manifest 构建标识 | 当前为 `20261125-live-audit-1` |
-| 系统字体样式标识 | `20261125-system-type-1`，用于静态资源缓存更新 |
+| 服务端 `APP_VERSION` | 当前源码为 `1.0.1` |
+| 前端 manifest 构建标识 | 当前为 `1.0.1` |
+| 系统字体样式标识 | `1.0.1`，与本次前端静态资源缓存版本一致 |
 | Git 提交号 | 精确标识仓库内容，排障和回滚时应同时记录 |
 | 上游模型版本 | 如 Seedance 2.0 Fast、2.5，与本服务版本无关 |
 
-只报告“2.8.3”不足以精确复现本定制版。排查问题时最好同时记录 Git 提交、前端资源版本、浏览器运行时与实际配置。
+只报告“1.0.1”不足以精确复现本定制版。排查问题时最好同时记录 Git 提交、前端资源版本、浏览器运行时与实际配置。
+
+1.0.1 是独立版本序列的起点；较高历史版本的实例首次切换时须手动发布，不能依赖现有自动更新的数值比较。详见 [1.0.1 说明](RELEASE-1.0.1.zh-CN.md)。
 
 ## 2. 现有功能与能力边界
 
@@ -1145,7 +1147,7 @@ sha256sum video.mp4
 | `DOLA_PUBLIC_BASE` | `http://127.0.0.1:<PORT>` | 对外作品地址必须改为客户端实际可访问的站点 |
 | `DOLA_API_KEYS` | 空，逗号分隔 | 与数据库 Key 共同决定业务鉴权分支 |
 | `DOLA_DB_PATH` | tasks.db | 任务、应用设置与业务 Key 数据库 |
-| `DOLA_POOL_DB_PATH` | pool_usage.db | 账号、代理与管理用户等数据 |
+| `DOLA_ACCOUNT_DB_PATH` | pool_usage.db | 账号、代理与管理用户等数据 |
 | `DOLA_DOWNLOAD_DIR` | downloads | 生成作品落地目录 |
 | `DOLA_REFERENCE_FILE_DIR` | refs | 内联素材落地目录 |
 | `DOLA_THUMB_DIR` | thumbs | 任务素材缩略图 |
@@ -1181,7 +1183,7 @@ DOLA_PORT=8002
 DOLA_PUBLIC_BASE=https://studio.example.com
 DOLA_API_KEYS=REPLACE_WITH_A_LONG_RANDOM_BUSINESS_KEY
 DOLA_DB_PATH=/srv/dola-studio-data/tasks.db
-DOLA_POOL_DB_PATH=/srv/dola-studio-data/pool_usage.db
+DOLA_ACCOUNT_DB_PATH=/srv/dola-studio-data/pool_usage.db
 DOLA_DOWNLOAD_DIR=/srv/dola-studio-data/downloads
 DOLA_REFERENCE_FILE_DIR=/srv/dola-studio-data/refs
 DOLA_THUMB_DIR=/srv/dola-studio-data/thumbs
@@ -1313,7 +1315,7 @@ COPY requirements.txt deploy-extra-requirements.txt ./
 
 ### 24.7 历史部署脚本应如何看待
 
-`deploy/README.md` 已标记其部分引用文件未包含在快照中。安装和更新脚本也保留历史仓库默认值，不能直接运行后覆盖当前定制源码。
+`deploy/README.md` 已标记其部分引用文件未包含在快照中。安装和更新脚本已使用自有仓库与 `dola-studio` 默认命名，但尚未完成从零安装、私有仓库认证与更新验收，不能直接按模板覆盖已有实例。
 
 某些报错仍提示安装 `deploy-cloak-requirements.txt`，但该文件在快照中不存在。排障要以当前 `requirements.txt`、已安装运行时及实际导入失败为准，不能反复找一个未交付文件。
 
@@ -1412,7 +1414,7 @@ GitHub 登录会话、Git SSH 认证、服务器 SSH、网站管理员、业务 
 
 ### 26.3 当前自动更新的限制
 
-配置默认 `DOLA_UPDATE_REPO` 为空，但历史安装和更新脚本仍可能存在原仓库默认值。自有私有仓库尚未建立完整兼容 release 产物、认证、校验、更新代理和回滚流程。
+配置默认 `DOLA_UPDATE_REPO` 为空；安装和更新脚本的默认仓库已统一为 `sailsships/dola-studio`。自有私有仓库尚未建立完整兼容 release 产物、认证、校验、更新代理和回滚流程。
 
 因此控制台“检查更新”成功，不代表可以安全点击安装并保留所有定制。当前阶段应使用已核对的手动发布流程。
 
@@ -1683,7 +1685,7 @@ python docs/reference/generate_source_reference.py
 
 关闭的是前端视图，后台任务独立执行。当前叉号不承担上游取消语义。
 
-### 为什么版本有 2.8.3，还是不能说全部安全？
+### 为什么版本为 1.0.1，还是不能说全部安全？
 
 版本号只说明源码标识。本轮核验了公开健康字段、会话撤销和若干操作，但没有完成全部接口、依赖和部署的安全审计。
 

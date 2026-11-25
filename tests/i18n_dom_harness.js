@@ -118,7 +118,7 @@ const head = new Element('head');
 const body = new Element('body');
 html.childNodes = [head, body]; head.parentNode = html; body.parentNode = html;
 global.document = {
-  documentElement: html, head, body, readyState: 'complete', title: 'dola-pool 管理面板',
+  documentElement: html, head, body, readyState: 'complete', title: 'Dola Studio 管理面板',
   createElement: t => new Element(t),
   addEventListener() {},
   querySelectorAll: sel => html.querySelectorAll(sel),

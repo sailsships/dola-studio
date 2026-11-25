@@ -1,5 +1,5 @@
 {
-  "build": "20261125-live-audit-1",
+  "build": "1.0.1",
   "format": "classic-script",
   "order": [
     "app/request-client.js",

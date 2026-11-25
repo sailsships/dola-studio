@@ -7,7 +7,7 @@
 | 保留名称 | 出现位置 | 性质与处理 |
 | --- | --- | --- |
 | Roins-hub and contributors | 根目录 `LICENSE`；`THIRD_PARTY_NOTICES.md` | 基础项目 MIT 版权归属，保留原文。 |
-| Roins-hub/dola-pool | 第三方来源说明、旧安装与更新脚本、部分测试 | 原项目仓库来源或旧发布渠道，不是 Dola Studio 自研署名。定制版自动上游安装默认关闭。 |
+| 基础项目原始来源 | `THIRD_PARTY_NOTICES.md` 中的[原始来源记录](https://github.com/sailsships/dola-studio/blob/7212e56e14c8b695e1c51e102ccf224a61ae1814/THIRD_PARTY_NOTICES.md) | 保留原仓库与兼容代码的准确来源，不改写为 Dola Studio 自研；当前安装和更新模板改为自有仓库，配置型自动更新默认关闭。 |
 | 协议兼容与历史移植来源 | 根目录 `THIRD_PARTY_NOTICES.md` | 重复的注释来源集中到该文件，保持实际来源记录，不改写为自研作者。 |
 
 部署模板中的产品目录、日志目录、服务名称现已统一使用 `dola-studio`，systemd 描述为 Dola Studio；模板文件为 `deploy/dola-studio.service`、`deploy/dola-studio-health.service`、`deploy/dola-studio-health.timer`。这些模板供独立部署使用，本轮未迁移当前生产站点的运行目录与服务。
@@ -22,6 +22,6 @@
 
 `protocol/js/bdms-sdk.js`、`bdcaptcha.js`、`extensions/` 中还包含上游 SDK、验证码或扩展资源及标识。未将其作者改署 Dola Studio，也未将这些资源认定为自研。
 
-`DOLA_*` 环境变量、`dola-pool-cookies-v1` 导出格式、既有服务器目录和 systemd 服务名属于兼容标识，不属于作者署名。直接批量替换可能影响部署、账号导入或历史数据读取，本次不更改这些运行约定。
+1.0.1 使用 `dola-studio-cookies-v1` 导出格式和 `DOLA_ACCOUNT_DB_PATH` 配置键。Cookie 导入按内容读取，仍可读取历史导出；账号库仍支持原环境变量，新键优先，默认文件名保持 `pool_usage.db`。部署脚本与模板统一为 `dola-studio`，本轮未迁移既有服务器目录和服务。历史验收中备份路径的旧根目录已明确脱敏，完整记录保留在相应文档链接的历史提交中。
 
 产品前端显示名称为 Dola Studio。第三方来源和版权说明保留于相应源码与许可文件，避免将不同来源的代码统一声明为自研。
