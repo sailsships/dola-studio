@@ -1,269 +1,116 @@
-/* Dola Studio 管理面板多语言（i18n）
- *
- * 面板源码里的中文就是源语言；web/i18n/<lang>.json 是「中文原文 -> 译文」映射。
- * 本脚本在页面上就地替换文字（文本节点、title / placeholder 等属性、alert / confirm / prompt），
- * 并用 MutationObserver 跟上面板动态渲染的内容，所以面板代码不需要为翻译做任何改动。
- *
- * 匹配顺序：整句精确匹配 -> 带 {0} {1} 占位符的模板 -> 按已知片段拼接（必须把中文全部覆盖才采用）。
- * 不想被翻译的元素加 translate="no" 或 class="notranslate"（如提示词、用户备注）。
- * 新增语言、更新词条的方法见 I18N.md。
- */
+/* Source-language DOM localization: never rebuild a form or reload a page. */
 (function () {
   'use strict';
-  // 语言列表：key = 下拉框选项；dict = 用哪个 json；bilingual = 译文后附中文原文
-  var LANGS = {
-    'zh': { label: '中文', html: 'zh-CN' },
-    'vi': { label: 'Tiếng Việt', html: 'vi', dict: 'vi' },
-    'vi-zh': { label: 'Song ngữ Việt + 中文', html: 'vi', dict: 'vi', bilingual: true }
-  };
-  var LS_KEY = 'dola_lang';
-  var ATTRS = ['title', 'placeholder', 'alt', 'aria-label'];
-  var CJK = /[一-鿿]/;
-  var PH = /\{(\d+)\}/g;
-
-  function pickLang() {
-    var saved = null;
-    try { saved = localStorage.getItem(LS_KEY); } catch (e) {}
-    if (saved && LANGS[saved]) return saved;
-    var nav = (navigator.languages && navigator.languages[0]) || navigator.language || '';
-    return /^vi\b/i.test(nav) ? 'vi' : 'zh';
+  const LANGS = {zh: {label:'中文',html:'zh-CN'},en:{label:'English',html:'en'},ja:{label:'日本語',html:'ja'},ko:{label:'한국어',html:'ko'}};
+  const KEY='dola_lang', ATTRS=['title','placeholder','alt','aria-label'], HAN=/[一-鿿]/, PH=/\{(\d+)\}/g;
+  const texts=new WeakMap(), attrs=new WeakMap(), dictionaries=new Map();
+  let lang='zh', dictionary=new Map(), patterns=[], fragments=null, cache=new Map(), request=0;
+  const normalize=s=>String(s).replace(/\s+/g,' ').trim();
+  const escape=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  function preference(){
+    let saved;try{saved=localStorage.getItem(KEY);}catch(_){}
+    if(saved)return LANGS[saved]?saved:'zh';
+    const browser=((navigator.languages||[])[0]||navigator.language||'').split('-')[0];
+    return LANGS[browser]?browser:'zh';
   }
-
-  var lang = pickLang();
-  var conf = LANGS[lang];
-  var dict = new Map();
-  var patterns = [];
-  var fragRe = null;
-  var cache = new Map();
-  var ready = !conf.dict;
-
-  function normalize(s) { return s.replace(/\s+/g, ' ').trim(); }
-  function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-
-  function load(data) {
-    var frags = [];
-    Object.keys(data).forEach(function (src) {
-      var dst = data[src];
-      if (!dst) return;  // 缺译：保持中文
-      if (/\{\d+\}/.test(src)) {
-        var parts = src.split(/\{\d+\}/);
-        var order = [];
-        src.replace(PH, function (_, i) { order.push(+i); });
-        patterns.push({
-          re: new RegExp('^' + parts.map(escRe).join('([\\s\\S]*?)') + '$'),
-          prefix: parts[0], suffix: parts[parts.length - 1], order: order, dst: dst,
-          weight: parts.join('').length
-        });
-      } else {
-        dict.set(src, dst);
-        frags.push(src);
+  function compile(data){
+    dictionary=new Map();patterns=[];cache=new Map();const parts=[];
+    Object.entries(data).forEach(([source,target])=>{
+      if(!target)return;
+      if(/\{\d+\}/.test(source)){
+        const chunks=source.split(/\{\d+\}/),order=[...source.matchAll(/\{(\d+)\}/g)].map(m=>+m[1]);
+        patterns.push({re:new RegExp('^'+chunks.map(escape).join('([\\s\\S]*?)')+'$'),order,target,weight:chunks.join('').length});
+      }else{dictionary.set(source,target);if(HAN.test(source))parts.push(source);}
+    });
+    patterns.sort((a,b)=>b.weight-a.weight);
+    fragments=parts.length?new RegExp(parts.sort((a,b)=>b.length-a.length).map(escape).join('|'),'g'):null;
+  }
+  function line(raw){
+    const source=normalize(raw);if(lang==='zh'||!HAN.test(source))return null;
+    if(cache.has(source))return cache.get(source);
+    let result=dictionary.get(source);
+    if(result==null)for(const p of patterns){
+      const match=p.re.exec(source);if(!match)continue;
+      const values={};p.order.forEach((index,i)=>{values[index]=match[i+1];});
+      // Captured values are opaque data: never recursively translate names/errors/prompts.
+      result=p.target.replace(PH,(_,i)=>values[i]??'');break;
+    }
+    if(result==null&&fragments){
+      // Check SOURCE remnants, not output: Japanese intentionally contains Han characters.
+      if(!HAN.test(source.replace(fragments,'')))result=source.replace(fragments,key=>dictionary.get(key));
+    }
+    if(cache.size>5000)cache.clear();cache.set(source,result??null);return result??null;
+  }
+  function translate(value){
+    if(value==null)return value;const raw=String(value),exact=line(raw);
+    if(exact!=null)return raw.match(/^\s*/)[0]+exact+raw.match(/\s*$/)[0];
+    return raw.split('\n').map(part=>{const out=line(part);return out==null?part:part.match(/^\s*/)[0]+out+part.match(/\s*$/)[0];}).join('\n');
+  }
+  function message(msg){
+    if(msg&&Array.isArray(msg.i18nParts)&&Array.isArray(msg.i18nValues)){
+      const tpl=msg.i18nParts.reduce((out,part,i)=>out+part+(i<msg.i18nValues.length?'{'+i+'}':''),'');
+      return translate(tpl).replace(PH,(_,i)=>String(msg.i18nValues[+i]));
+    }return translate(msg==null?'':msg);
+  }
+  function skipped(el,attributes){return !el||!!el.closest('[translate="no"],.notranslate,script,style,code,pre,[contenteditable="true"]'+(attributes?'':',textarea'));}
+  function doText(node){
+    if(skipped(node.parentElement,false))return;
+    const current=node.data,prev=texts.get(node),source=prev&&current===prev.out?prev.source:current,out=translate(source);
+    texts.set(node,{source,out});if(current!==out)node.data=out;
+  }
+  function doAttrs(el){
+    if(el.matches('option[data-account-name]')){const label=el.getAttribute('data-account-name')+' · '+translate(el.getAttribute('data-account-status'));if(el.textContent!==label)el.textContent=label;}
+    if(skipped(el,true))return;let record=attrs.get(el);if(!record){record={};attrs.set(el,record);}
+    for(const name of ATTRS){
+      const current=el.getAttribute(name);if(current==null){delete record[name];continue;}
+      const prev=record[name],source=prev&&current===prev.out?prev.source:current,out=translate(source);
+      record[name]={source,out};if(current!==out)el.setAttribute(name,out);
+    }
+  }
+  function walk(root){
+    if(root.nodeType===3){doText(root);return;}if(root.nodeType!==1)return;
+    doAttrs(root);const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT|NodeFilter.SHOW_ELEMENT);let node;
+    while((node=walker.nextNode())){if(node.nodeType===3)doText(node);else doAttrs(node);}
+  }
+  function switches(){
+    document.querySelectorAll('select[data-i18n-switcher]').forEach(select=>{
+      if(!select.dataset.i18nMounted){
+        select.setAttribute('translate','no');
+        select.replaceChildren(...Object.entries(LANGS).map(([value,conf])=>{const option=document.createElement('option');option.value=value;option.textContent=conf.label;return option;}));
+        select.dataset.i18nMounted='true';select.addEventListener('change',()=>{void setLang(select.value);});
+      }select.value=lang;
+    });
+  }
+  async function setLang(next,persist=true){
+    if(!LANGS[next])return false;const id=++request;
+    document.documentElement.setAttribute('data-language-loading',next);
+    try{
+      let data={};
+      if(next!=='zh'){
+        if(!dictionaries.has(next)){
+          const response=await fetch('i18n/'+next+'.json?v=1.0.1-four-languages',{cache:'no-cache'});
+          if(!response.ok)throw new Error('Dictionary HTTP '+response.status);
+          const loaded=await response.json();
+          if(!loaded||Array.isArray(loaded)||typeof loaded!=='object'||!Object.keys(loaded).length||!Object.values(loaded).every(v=>typeof v==='string'))throw new Error('Invalid dictionary');
+          dictionaries.set(next,loaded);
+        }data=dictionaries.get(next);
       }
-    });
-    patterns.sort(function (a, b) { return b.weight - a.weight; });
-    frags.sort(function (a, b) { return b.length - a.length; });
-    if (frags.length) fragRe = new RegExp(frags.map(escRe).join('|'), 'g');
+      if(id!==request)return false;
+      compile(data);lang=next;document.documentElement.lang=LANGS[lang].html;document.documentElement.dataset.language=lang;
+      if(document.body)walk(document.body);if(document.querySelector('title'))walk(document.querySelector('title'));switches();
+      if(persist)try{localStorage.setItem(KEY,lang);}catch(_){}
+      window.dispatchEvent(new CustomEvent('studio:languagechange',{detail:{language:lang}}));return true;
+    }catch(error){
+      if(id===request){switches();console.warn('[i18n] Language unchanged:',error.message);if(window.toast)window.toast('语言加载失败，请稍后重试');}return false;
+    }finally{if(id===request){document.documentElement.removeAttribute('data-language-loading');document.documentElement.classList.remove('i18n-pending');}}
   }
-
-  function trLine(raw) {
-    var s = normalize(raw);
-    if (!CJK.test(s)) return null;
-    if (cache.has(s)) return cache.get(s);
-    var out = dict.has(s) ? dict.get(s) : null;
-    if (out == null) {
-      for (var i = 0; i < patterns.length && out == null; i++) {
-        var p = patterns[i];
-        if (!s.startsWith(p.prefix) || !s.endsWith(p.suffix)) continue;
-        var m = p.re.exec(s);
-        if (!m) continue;
-        var vals = {};
-        p.order.forEach(function (idx, k) { vals[idx] = m[k + 1]; });
-        out = p.dst.replace(PH, function (_, idx) {
-          var v = vals[idx] == null ? '' : vals[idx];
-          var t = trLine(v);
-          return t == null ? v : t;
-        });
-      }
-    }
-    if (out == null && fragRe) {
-      var joined = s.replace(fragRe, function (k) { return dict.get(k); });
-      if (!CJK.test(joined)) out = joined;  // 中文没被完全覆盖就不采用，免得中越混杂
-    }
-    if (cache.size > 5000) cache.clear();
-    cache.set(s, out);
-    return out;
+  window.I18N=Object.freeze({get lang(){return lang;},languages:LANGS,setLang,t:translate,message,
+    sourceText:node=>{const rec=texts.get(node);return rec&&node.data===rec.out?rec.source:node.data;}});
+  function start(){
+    switches();new MutationObserver(records=>{for(const r of records){if(r.type==='childList')r.addedNodes.forEach(walk);else if(r.type==='characterData')doText(r.target);else doAttrs(r.target);}})
+      .observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:ATTRS});
+    void setLang(preference(),false);
   }
-
-  /** 译一段文字。多行文字优先逐行译（保留换行）；逐行译不全再整句译，仍不行就能译几行译几行。
-   *  没有可译内容返回 null。 */
-  function tr(text) {
-    if (!ready || !conf.dict || text == null) return null;
-    text = String(text);
-    if (!CJK.test(text)) return null;
-    if (text.indexOf('\n') < 0) return trLine(text);
-    var changed = false, complete = true;
-    var lines = text.split('\n').map(function (line) {
-      var t = trLine(line);
-      if (t == null) { if (CJK.test(line)) complete = false; return line; }
-      changed = true;
-      return line.match(/^\s*/)[0] + t;
-    });
-    if (complete) return lines.join('\n');
-    var whole = trLine(text);
-    if (whole != null) return whole;
-    return changed ? lines.join('\n') : null;
-  }
-
-  // 双语：译文后附中文原文；「点」「条」这类单字片段不附，免得满屏括号
-  function bi(src, out) {
-    if (!conf.bilingual) return out;
-    var hanzi = src.match(/[一-鿿]/g);
-    return hanzi && hanzi.length >= 2 ? out + ' (' + normalize(src) + ')' : out;
-  }
-
-  /* ---------- DOM ---------- */
-  var textRec = new WeakMap();   // 文本节点 -> {out}
-  var attrRec = new WeakMap();   // 元素 -> {attr: out}
-
-  // textarea 里的文字是用户输入，不翻；但它自己的 placeholder / title 要翻
-  function skipped(el, forAttrs) {
-    var sel = '[translate="no"],.notranslate,script,style' + (forAttrs ? '' : ',textarea');
-    return !el || !!el.closest(sel);
-  }
-
-  function doText(node) {
-    var v = node.data;
-    var rec = textRec.get(node);
-    if (rec && rec.out === v) return;  // 我们自己刚写进去的
-    if (!CJK.test(v) || skipped(node.parentElement)) return;
-    var t = tr(v);
-    if (t == null) return;
-    var out = v.match(/^\s*/)[0] + bi(v, t) + v.match(/\s*$/)[0];
-    textRec.set(node, { out: out });
-    node.data = out;
-  }
-
-  function doAttrs(el) {
-    if (skipped(el, true)) return;
-    var rec = attrRec.get(el);
-    for (var i = 0; i < ATTRS.length; i++) {
-      var a = ATTRS[i];
-      var v = el.getAttribute(a);
-      if (!v || (rec && rec[a] === v) || !CJK.test(v)) continue;
-      var t = tr(v);
-      if (t == null) continue;
-      var out = a === 'title' ? bi(v, t) : t;
-      if (!rec) { rec = {}; attrRec.set(el, rec); }
-      rec[a] = out;
-      el.setAttribute(a, out);
-    }
-  }
-
-  function walk(root) {
-    if (root.nodeType === 3) { doText(root); return; }
-    if (root.nodeType !== 1) return;
-    doAttrs(root);
-    var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
-    var n;
-    while ((n = w.nextNode())) {
-      if (n.nodeType === 3) doText(n); else doAttrs(n);
-    }
-  }
-
-  function translateTitle() {
-    var t = tr(document.title);
-    if (t != null) document.title = t;
-  }
-
-  function start() {
-    translateTitle();
-    walk(document.body);
-    new MutationObserver(function (records) {
-      records.forEach(function (r) {
-        if (r.type === 'childList') r.addedNodes.forEach(walk);
-        else if (r.type === 'characterData') doText(r.target);
-        else if (r.type === 'attributes') doAttrs(r.target);
-      });
-    }).observe(document.body, {
-      subtree: true, childList: true, characterData: true,
-      attributes: true, attributeFilter: ATTRS
-    });
-    mountSwitchers();
-    document.documentElement.classList.remove('i18n-pending');
-  }
-
-  /* ---------- alert / confirm / prompt ---------- */
-  function wrapDialog(name) {
-    var orig = window[name];
-    window[name] = function (msg) {
-      var args = Array.prototype.slice.call(arguments);
-      if (msg && Array.isArray(msg.i18nParts) && Array.isArray(msg.i18nValues)) {
-        // Translate the template before interpolation. Names, errors and other values are opaque.
-        var src = String(msg);
-        var template = msg.i18nParts.reduce(function (out, part, i) {
-          return out + part + (i < msg.i18nValues.length ? '{' + i + '}' : '');
-        }, '');
-        var translated = tr(template);
-        args[0] = translated == null ? src : translated.replace(PH, function (_, i) {
-          return String(msg.i18nValues[+i]);
-        });
-        if (translated != null && conf.bilingual) args[0] += '\n\n' + src;
-      } else {
-        var t = tr(msg);
-        if (t != null) args[0] = conf.bilingual ? t + '\n\n' + msg : t;
-      }
-      return orig.apply(window, args);
-    };
-  }
-
-  /* ---------- 语言下拉框：<select data-i18n-switcher></select> ---------- */
-  function mountSwitchers() {
-    document.querySelectorAll('select[data-i18n-switcher]').forEach(function (sel) {
-      if (sel.options.length) return;
-      sel.setAttribute('translate', 'no');
-      Object.keys(LANGS).forEach(function (k) {
-        var o = document.createElement('option');
-        o.value = k;
-        o.textContent = LANGS[k].label;
-        o.selected = k === lang;
-        sel.appendChild(o);
-      });
-      sel.addEventListener('change', function () { setLang(sel.value); });
-    });
-  }
-
-  function setLang(k) {
-    if (!LANGS[k] || k === lang) return;
-    try { localStorage.setItem(LS_KEY, k); } catch (e) {}
-    location.reload();
-  }
-
-  function onReady(fn) {
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn);
-    else fn();
-  }
-
-  window.I18N = {
-    lang: lang,
-    languages: LANGS,
-    setLang: setLang,
-    /** 代码里需要主动翻译时用：I18N.t('中文原文') */
-    t: function (s) { var r = tr(s); return r == null ? s : r; }
-  };
-
-  document.documentElement.lang = conf.html;
-  ['alert', 'confirm', 'prompt'].forEach(wrapDialog);
-  if (!conf.dict) { onReady(mountSwitchers); return; }
-
-  // 词典加载完之前先把页面藏起来，避免先闪一下中文
-  document.documentElement.classList.add('i18n-pending');
-  var style = document.createElement('style');
-  style.textContent = 'html.i18n-pending body{visibility:hidden}';
-  document.head.appendChild(style);
-  setTimeout(function () { document.documentElement.classList.remove('i18n-pending'); }, 3000);
-
-  fetch('i18n/' + conf.dict + '.json', { cache: 'no-cache' })
-    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then(function (data) { load(data); ready = true; })
-    .catch(function (e) { console.warn('[i18n] 词典加载失败，保持中文：', e); })
-    .then(function () { onReady(start); });
+  if(preference()!=='zh'){document.documentElement.classList.add('i18n-pending');setTimeout(()=>document.documentElement.classList.remove('i18n-pending'),3000);}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
 })();

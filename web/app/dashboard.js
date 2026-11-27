@@ -16,7 +16,7 @@ async function legacyLoadDash(){
   setHTML('#poolGroups',Object.entries(counts).map(([g,n])=>`<span class="summary-group">${esc(g)}<b>${n}</b></span>`).join(''));
   const max=Math.max(1,...st.per_day.map(d=>d.completed+d.failed));
   setHTML('#chart',st.per_day.map(d=>`<div class="col"><span class="chart-value">${d.completed+d.failed}</span><div class="bars"><div class="bar" style="height:${Math.round(d.completed/max*75)}px;background:var(--accent)" title="${esc(d.day)} 完成 ${d.completed}"></div><div class="bar" style="height:${Math.round(d.failed/max*75)}px;background:#74747e" title="${esc(d.day)} 失败 ${d.failed}"></div></div><div class="lbl">${esc(d.day)}</div></div>`).join(''));
-  setHTML('#perAccount',table(['账号','状态','剩余条数'],st.per_account.slice(0,4).map(a=>[`<span class="account-id" title="${esc(a.name)}">${esc(a.name)}</span>`,groupBadge(a),quotaCell(a)])));
+  setHTML('#perAccount',table(['账号','状态','剩余条数'],st.per_account.slice(0,4).map(a=>[`<span class="account-id" translate="no" title="${esc(a.name)}">${esc(a.name)}</span>`,groupBadge(a),quotaCell(a)])));
 
 }
 

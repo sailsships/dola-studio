@@ -7,7 +7,7 @@
   const queue=[];let busy=false,current=null;
   const RISKY=/删除|清空|移除|重置|注销|停止|丢弃|覆盖/;
   function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e;}
-  function open(kind,msg,def){return new Promise(resolve=>{queue.push({kind,msg:String(msg==null?'':msg),def,resolve});next();});}
+  function open(kind,msg,def){return new Promise(resolve=>{queue.push({kind,msg:String(msg==null?'':msg),source:msg,def,resolve});next();});}
   function next(){
     // 兜底：开着的弹窗被别的代码从页面上移除了，不能让队列永远卡住
     if(busy&&current&&!document.body.contains(current))busy=false;
@@ -21,11 +21,13 @@
     box.setAttribute('aria-modal','true');box.setAttribute('aria-labelledby','ndTitle');box.setAttribute('aria-describedby','ndMsg');
     const title=el('h3','nd-title',it.kind==='alert'?'提示':it.kind==='prompt'?'请输入':risky?'请再次确认':'请确认');
     title.id='ndTitle';
-    const body=el('p','nd-msg',it.msg);body.id='ndMsg';body.setAttribute('translate','no');
+    const body=el('p','nd-msg',window.I18N?I18N.message(it.source):it.msg);body.id='ndMsg';body.setAttribute('translate','no');
     box.append(title,body);
     let input=null;
     if(it.kind==='prompt'){input=el('textarea','nd-input');input.rows=3;input.value=it.def==null?'':String(it.def);
       input.setAttribute('aria-labelledby','ndMsg');input.setAttribute('translate','no');box.append(input);}
+    const refreshMessage=()=>{body.textContent=window.I18N?I18N.message(it.source):it.msg;};
+    window.addEventListener('studio:languagechange',refreshMessage);
     const row=el('div','nd-actions');
     let cancel=null;
     cancel=el('button','dialog-close');cancel.type='button';cancel.setAttribute('aria-label','关闭窗口');cancel.title='关闭';cancel.innerHTML=ConsoleSync.icon;box.prepend(cancel);
@@ -34,7 +36,7 @@
     row.append(ok);box.append(row);wrap.append(box);document.body.append(wrap);current=wrap;
     requestAnimationFrame(()=>wrap.classList.add('nd-in'));
     function done(value){
-      document.removeEventListener('keydown',onKey,true);wrap.remove();busy=false;
+      document.removeEventListener('keydown',onKey,true);window.removeEventListener('studio:languagechange',refreshMessage);wrap.remove();busy=false;
       try{if(prev&&prev.focus&&document.contains(prev))prev.focus();}catch(e){}
       it.resolve(value);next();
     }

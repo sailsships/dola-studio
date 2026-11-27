@@ -7,11 +7,13 @@
 <link rel="icon" type="image/svg+xml" href="/logo.svg?v=1.0.1">
 <link rel="alternate icon" type="image/x-icon" href="/favicon.ico?v=1.0.1">
 <link rel="apple-touch-icon" href="/studio-icon-180.png?v=1.0.1">
-<script src="app/dialogs.js?v=1.0.1"></script>
+<script src="preferences.js?v=1.0.1&rev=b9cd3ea97616"></script>
+<script src="app/dialogs.js?v=1.0.1&rev=219d3435259a"></script>
 <script src="studio-brand.js?v=1.0.1"></script>
-<script src="i18n/i18n.js?v=1.0.1"></script>
+<script src="i18n/i18n.js?v=1.0.1&rev=c677325c5c17"></script>
 <link rel="stylesheet" href="shell.css?v=1.0.1">
 <link rel="stylesheet" href="console.css?v=1.0.1">
+<link rel="stylesheet" href="preferences.css?v=1.0.1&rev=601c0adf2cd5">
 <link rel="preload" as="script" href="app/request-client.js?v=1.0.1">
 <link rel="preload" as="script" href="app/runtime.233eaa892e34.js?v=1.0.1">
 <link rel="preload" as="script" href="app/settings.js?v=1.0.1">
@@ -19,7 +21,7 @@
 <link rel="preload" as="script" href="app/duration.js?v=1.0.1">
 <link rel="preload" as="script" href="app/responder.js?v=1.0.1">
 <link rel="preload" as="script" href="app/upscale.js?v=1.0.1">
-<link rel="preload" as="script" href="app/dashboard.8b6e46f231c0.js?v=1.0.1">
+<link rel="preload" as="script" href="app/dashboard.161cd0d33471.js?v=1.0.1">
 <link rel="preload" as="script" href="app/accounts.1edefa75f90f.js?v=1.0.1">
 <link rel="preload" as="script" href="app/proxies.js?v=1.0.1">
 <link rel="preload" as="script" href="app/selection.js?v=1.0.1">
@@ -28,7 +30,7 @@
 <link rel="preload" as="script" href="app/videos.js?v=1.0.1">
 <link rel="preload" as="script" href="app/api-keys.js?v=1.0.1">
 <link rel="preload" as="script" href="app/diagnostics.js?v=1.0.1">
-<link rel="preload" as="script" href="app/creation.cc8869c4636b.js?v=1.0.1">
+<link rel="preload" as="script" href="app/creation.0cb2b55cbe51.js?v=1.0.1">
 <link rel="preload" as="script" href="app/boot.5d8bc51e2c4e.js?v=1.0.1">
 <link rel="preload" as="script" href="app/refresh-engine.71c9bbf1c395.js?v=1.0.1">
 </head>
@@ -85,13 +87,15 @@
       </div>
       <span class="top-sep" aria-hidden="true"></span>
       
-      <select class="lang-sel" data-i18n-switcher aria-label="Language"></select>
       <span class="top-sep" aria-hidden="true"></span>
       <button class="btn top-btn top-logout" onclick="logout()" title="清除面板密码"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/></svg>注销</button>
     </div>
   </div>
 </aside>
-<header class="workspace-header"><div class="workspace-name"><b>视频创作空间</b><span>视频创作控制台</span></div></header>
+<header class="workspace-header"><div class="workspace-name"><b>视频创作空间</b><span>视频创作控制台</span></div><div class="workspace-preferences" aria-label="界面偏好">
+  <button type="button" class="preference-button" data-theme-toggle aria-label="切换到黑夜模式" title="切换到黑夜模式" aria-pressed="false"><svg class="moon-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 13a8.7 8.7 0 0 1-9.9-9.8A8.8 8.8 0 1 0 20.8 13Z"/></svg><svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg></button>
+  <label class="language-picker"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/></svg><select data-i18n-switcher aria-label="界面语言"></select></label>
+</div></header>
 
 <main>
   <section id="tab-dash">
@@ -334,7 +338,7 @@
 <script src="app/duration.js?v=1.0.1"></script>
 <script src="app/responder.js?v=1.0.1"></script>
 <script src="app/upscale.js?v=1.0.1"></script>
-<script src="app/dashboard.8b6e46f231c0.js?v=1.0.1"></script>
+<script src="app/dashboard.161cd0d33471.js?v=1.0.1"></script>
 <script src="app/accounts.1edefa75f90f.js?v=1.0.1"></script>
 <script src="app/proxies.js?v=1.0.1"></script>
 <script src="app/selection.js?v=1.0.1"></script>
@@ -343,7 +347,7 @@
 <script src="app/videos.js?v=1.0.1"></script>
 <script src="app/api-keys.js?v=1.0.1"></script>
 <script src="app/diagnostics.js?v=1.0.1"></script>
-<script src="app/creation.cc8869c4636b.js?v=1.0.1"></script>
+<script src="app/creation.0cb2b55cbe51.js?v=1.0.1"></script>
 <script src="app/boot.5d8bc51e2c4e.js?v=1.0.1"></script>
 <script src="api-guide.js?v=1.0.1"></script>
 </body>

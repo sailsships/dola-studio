@@ -26,7 +26,10 @@ def test_account_batch_delete_reaches_selected_accounts_only():
     assert 'onclick="deleteSelectedAccounts()"' in html
     names = re.findall(r"^(?:async )?function (\w+)\(", html, re.M)
     assert len(names) == len(set(names)), "Duplicate global functions can silently override handlers"
-    code = re.search(r"async function deleteSelectedAccounts\(\).*?(?=\n(?:async )?function )", html, re.S)[0]
+    manifest = json.loads((ROOT / "web/app/manifest.json").read_text())
+    active = next(name for name in manifest["order"] if name.startswith("app/accounts."))
+    code = re.search(r"async function deleteSelectedAccounts\(\).*?(?=\n(?:async )?function )",
+                     (ROOT / "web" / active).read_text(encoding="utf-8"), re.S)[0]
     node = shutil.which("node")
     if not node:
         pytest.skip("node required")
@@ -37,6 +40,9 @@ let approve=false;
 const confirm=()=>approve, alert=()=>{}, refresh=()=>{}, updateSelButtons=()=>{};
 const api=async (url,opts)=>{assert.equal(opts.method,'DELETE');calls.push(url);};
 const dialogText=(parts,...values)=>parts.reduce((s,p,i)=>s+p+(values[i]||''),'');
+const toast=()=>{};
+const hideAccountsImmediately=names=>names.forEach(n=>selAccounts.delete(n));
+const deleteAccountInBackground=(name,url)=>api(url,{method:'DELETE'});
 """ + code + """
 (async()=>{
  await deleteSelectedAccounts();assert.equal(calls.length,0);assert.equal(selAccounts.size,2);

@@ -1,6 +1,6 @@
 """管理面板多语言：用户 / 上游数据不能被词典改写（PR #12 审查 P2）。
 
-动态 DOM 部分用 node 跑 tests/i18n_dom_harness.js（极简 DOM + 真实的 i18n.js、vi.json 和面板渲染函数）；
+动态 DOM 部分用 node 跑 tests/i18n_dom_harness.js（极简 DOM + 真实的 i18n.js、三份词典 和面板渲染函数）；
 没装 node 时跳过。静态部分扫 web/index.html，防止以后新加的渲染点忘了用 noTr / translate="no"。
 """
 import json
@@ -30,7 +30,7 @@ def dom():
 def test_dictionary_would_rewrite_the_name(dom):
     # 前提：词典里真有这一条，否则下面的用例测不出东西
     assert dom["dict_has_name"]
-    assert dom["default_button"] == "Proxy (mặc định)"
+    assert dom["default_button"] == dom["default_expected"]
 
 
 def test_proxy_names_kept(dom):
@@ -40,10 +40,11 @@ def test_proxy_names_kept(dom):
 
 
 def test_panel_text_around_data_still_translated(dom):
-    assert dom["dialog_title"] == "Đặt proxy tài khoản: acc1"
-    assert dom["default_option"] == "Proxy mặc định (DOLA_PROXY)"
-    assert dom["egress_direct"] == "Máy chủ kết nối trực tiếp (chưa cấu hình proxy)"
-    assert dom["note_title"] == "Nhấn để sửa ghi chú"
+    assert dom["dialog_title"] == dom["expected_proxy_title"]
+    assert dom["default_option"] == "Default proxy (DOLA_PROXY)"
+    assert dom["egress_direct"] == dom["expected_direct"]
+    assert dom["note_button"] == dom["expected_note_button"]
+    assert dom["note_account"] == "acc1"
 
 
 def test_notes_and_upstream_text_kept(dom):
@@ -78,7 +79,7 @@ def test_panel_renders_user_data_with_notr():
     assert not raw
 
 
-@pytest.mark.parametrize("lang", ["zh", "vi", "vi-zh"])
+@pytest.mark.parametrize("lang", ["zh", "en", "ja", "ko"])
 def test_native_dialogs_keep_dynamic_values(lang):
     node = shutil.which("node")
     if not node:
@@ -98,6 +99,11 @@ def test_native_dialogs_keep_dynamic_values(lang):
     if lang == "zh":
         assert result["delete_account_confirm"] == "确定删除账号 风控账号？将同时删除其 profile。"
     else:
-        assert result["delete_account_confirm"].startswith("Xác nhận xóa tài khoản 风控账号?")
-        if lang == "vi-zh":
-            assert "确定删除账号 风控账号？将同时删除其 profile。" in result["delete_account_confirm"]
+        locale = json.loads((ROOT / "web/i18n" / (lang + ".json")).read_text(encoding="utf-8"))
+        assert result["delete_account_confirm"] == locale["确定删除账号 {0}？将同时删除其 profile。"].replace("{0}", "风控账号")
+
+
+def test_in_place_language_roundtrip_keeps_source(dom):
+    assert dom["roundtrip_zh"] == "账号管理"
+    assert dom["roundtrip_ja"] == "アカウント管理"
+    assert dom["roundtrip_ko"] == "계정 관리"

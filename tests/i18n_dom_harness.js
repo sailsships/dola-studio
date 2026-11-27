@@ -8,8 +8,9 @@ const path = require('path');
 
 const ROOT = process.argv[2];
 const I18N_JS = fs.readFileSync(path.join(ROOT, 'web', 'i18n', 'i18n.js'), 'utf8');
-const DICT = JSON.parse(fs.readFileSync(path.join(ROOT, 'web', 'i18n', 'vi.json'), 'utf8'));
-const PANEL = fs.readFileSync(path.join(ROOT, 'web', 'index.html'), 'utf8');
+const LANG = process.argv[3] || 'en';
+const DICT = LANG==='zh'?{}:JSON.parse(fs.readFileSync(path.join(ROOT, 'web', 'i18n', LANG+'.json'), 'utf8'));
+const PANEL = fs.readFileSync(path.join(ROOT, 'web', 'index.html'), 'utf8')+'\n'+JSON.parse(fs.readFileSync(path.join(ROOT,'web/app/manifest.json'),'utf8')).order.map(n=>fs.readFileSync(path.join(ROOT,'web',n),'utf8')).join('\n');
 
 /* ---------- 极简 DOM ---------- */
 const observers = [];
@@ -40,7 +41,7 @@ const VOID = new Set(['input', 'br', 'img', 'hr', 'meta']);
 class Element {
   constructor(tag) {
     this.nodeType = 1; this.tagName = tag.toUpperCase(); this.attrs = new Map();
-    this.childNodes = []; this.parentNode = null;
+    this.childNodes = []; this.parentNode = null; this.dataset={}; this.style={};
     const self = this;
     this.classList = {
       add(c) { const s = self._classes(); s.add(c); self.attrs.set('class', [...s].join(' ')); },
@@ -52,6 +53,7 @@ class Element {
   get parentElement() { return this.parentNode; }
   getAttribute(a) { return this.attrs.has(a) ? this.attrs.get(a) : null; }
   setAttribute(a, v) { this.attrs.set(a, String(v)); notify({ type: 'attributes', target: this, attributeName: a }); }
+  removeAttribute(a) { this.attrs.delete(a); }
   appendChild(n) {
     n.parentNode = this; this.childNodes.push(n);
     notify({ type: 'childList', target: this, addedNodes: [n] });
@@ -68,6 +70,7 @@ class Element {
     return sel.split(',').some(s => {
       s = s.trim();
       let m;
+      if(s==='option[data-account-name]')return this.tagName==='OPTION'&&this.attrs.has('data-account-name');
       if ((m = /^\[([\w-]+)="([^"]*)"\]$/.exec(s))) return this.getAttribute(m[1]) === m[2];
       if ((m = /^\.([\w-]+)$/.exec(s))) return this._classes().has(m[1]);
       return this.tagName === s.toUpperCase();
@@ -122,6 +125,7 @@ global.document = {
   createElement: t => new Element(t),
   addEventListener() {},
   querySelectorAll: sel => html.querySelectorAll(sel),
+  querySelector: sel => html.querySelectorAll(sel)[0]||null,
   createTreeWalker(root) {
     const list = [];
     (function rec(n) { n.childNodes.forEach(c => { list.push(c); if (c.nodeType === 1) rec(c); }); })(root);
@@ -130,15 +134,16 @@ global.document = {
   }
 };
 global.window = global;
+global.dispatchEvent=()=>{};global.CustomEvent=class{constructor(type,options){this.type=type;this.detail=options.detail;}};
 global.NodeFilter = { SHOW_TEXT: 4, SHOW_ELEMENT: 1 };
 global.MutationObserver = MutationObserver;
-global.localStorage = { getItem: () => process.argv[3] || 'vi', setItem() {} };
+global.localStorage = { getItem: () => LANG, setItem() {} };
 global.location = { reload() {} };
 const dialogs = [];
-global.alert = m => { dialogs.push(String(m)); };
-global.confirm = m => { dialogs.push(String(m)); return false; };
-global.prompt = m => { dialogs.push(String(m)); return null; };
-global.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(DICT) });
+global.alert = m => { dialogs.push(global.I18N?I18N.message(m):String(m)); };
+global.confirm = m => { dialogs.push(global.I18N?I18N.message(m):String(m)); return false; };
+global.prompt = m => { dialogs.push(global.I18N?I18N.message(m):String(m)); return null; };
+global.fetch = url => Promise.resolve({ok:true,json:()=>Promise.resolve(JSON.parse(fs.readFileSync(path.join(ROOT,'web',url.split('?')[0]),'utf8')))});
 
 /** 从 index.html 里按名字取出一个顶层 function 的源码（括号配平）。 */
 function panelFn(name) {
@@ -212,8 +217,10 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 
   // 账号备注：备注原文不动，悬停提示照常翻译
   await render(P.noteCell({ name: 'acc1', note: NAME }));
+  out.note_button = box.childNodes[0].textContent;
+  out.note_account = box.childNodes[0].getAttribute('data-note-account');
+  await render(P.noTr(NAME));
   out.note_text = box.childNodes[0].textContent;
-  out.note_title = box.childNodes[0].getAttribute('title');
 
   // dola 原话（任务列表「报错/备注」列）
   await render(P.foldText('t1:cur', 'acc1 · dola：', NAME, 60));
@@ -243,5 +250,10 @@ const tick = () => new Promise(r => setTimeout(r, 0));
   out.opaque_alert = dialogs.at(-1);
   prompt(P.dialogText`原因：${unusual}`, unusual);
   out.opaque_prompt = dialogs.at(-1);
+  const roundtrip=new Element('p');roundtrip.textContent='账号管理';body.appendChild(roundtrip);await tick();
+  await I18N.setLang('ja');out.roundtrip_ja=roundtrip.textContent;
+  await I18N.setLang('zh');out.roundtrip_zh=roundtrip.textContent;
+  await I18N.setLang('ko');out.roundtrip_ko=roundtrip.textContent;
+  out.lang=LANG;out.default_expected=DICT[NAME]||NAME;out.expected_proxy_title=DICT['设置账号代理：']+'acc1';out.expected_direct=DICT['服务器直连（未配代理）'];out.expected_note_button=DICT['详情'];
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(e && e.stack || e); process.exit(1); });

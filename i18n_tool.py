@@ -234,7 +234,11 @@ def extract(html: str):
 
 
 def catalog():
-    return extract(INDEX_HTML.read_text(encoding="utf-8"))
+    keys = extract(INDEX_HTML.read_text(encoding="utf-8"))
+    manifest = json.loads((ROOT / "web/app/manifest.json").read_text(encoding="utf-8"))
+    for name in manifest["order"] + ["app/dialogs.js", "preferences.js", "api-guide.js"]:
+        keys.extend(keys_from_js((ROOT / "web" / name).read_text(encoding="utf-8")))
+    return [key for key in dict.fromkeys(keys) if not key.startswith("古风玄幻夜景，")]
 
 
 def locale_path(lang: str) -> Path:

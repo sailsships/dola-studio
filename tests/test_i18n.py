@@ -48,7 +48,7 @@ def test_notr_splits_like_runtime_text_nodes():
 
 def test_panel_catalog_covers_main_ui():
     keys = set(i18n_tool.catalog())
-    for k in ("仪表盘", "账号管理", "代理管理", "任务列表", "登录"):
+    for k in ("创作工作台", "账号管理", "代理管理", "任务列表", "登录"):
         assert k in keys
 
 

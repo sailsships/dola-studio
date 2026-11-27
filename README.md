@@ -26,6 +26,10 @@
   <a href="#documentation">详细文档</a>
 </p>
 
+<p align="center">
+  <strong>中文</strong> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
+</p>
+
 <a id="overview"></a>
 
 ## 项目介绍
@@ -59,6 +63,12 @@ Dola Studio 围绕 **聊天模式、工作模式、双平台批量管理、统�
 | 统一 API | 创建和查询视频任务、获取作品、调用豆包图片生成与编辑；管理业务密钥并调试接入 |
 
 视频超分是可选功能，**默认关闭**；开启后仍需配置相应服务。
+
+### 界面语言与外观
+
+管理台右上角提供 **白天 / 黑夜**模式和 **中文、English、日本語、한국어**语言选择。设置保存在当前浏览器，下次打开沿用；切换即时生效，不刷新页面、不重置已输入的表单、不改变后台任务。账号名、提示词、备注、API Key、接口字段与上游原始回执保持原样，不会被翻译。登录页也可选择语言。
+
+四版 README 介绍相同的核心能力、额度、启动与 API 接入流程；下方详细运维文档目前以中文为主。
 
 <a id="console"></a>
 
@@ -214,7 +224,7 @@ curl --fail-with-body --silent --show-error \
 
 **版本是否保证所有功能长期稳定？**
 
-版本保持 **1.0.1**。两种模式有历史真实出片记录，但不等于所有账号与组合均成功。本次首页发布只整理文档和展示截图，没有重新提交上游生成；详见[验证范围](docs/DEPLOYMENT-API-REFERENCE.zh-CN.md#verification)。
+版本保持 **1.0.1**。两种模式有历史真实出片记录，但不等于所有账号与组合均成功。本次语言与外观更新不重新提交上游视频生成；详见[验证范围](docs/DEPLOYMENT-API-REFERENCE.zh-CN.md#verification)。
 
 <a id="contributing"></a>
 
