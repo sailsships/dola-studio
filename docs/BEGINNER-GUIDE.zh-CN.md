@@ -261,7 +261,7 @@ curl --fail-with-body --silent --show-error \
   --header "Authorization: Bearer ${DOLA_API_KEY}"
 ```
 
-等待 `completed` 后读取 `video_url` 或 `videos`。请求返回成功只是任务受理，不能用它代替最终视频验证。不要用管理登录会话替代业务 Bearer Key。更多字段见 [API 接入](../README.md#api)。
+等待 `completed` 后读取 `video_url` 或 `videos`。请求返回成功只是任务受理，不能用它代替最终视频验证。不要用管理登录会话替代业务 Bearer Key。更多字段见 [API 接入参考](DEPLOYMENT-API-REFERENCE.zh-CN.md#api)。
 
 ## 八、首次使用常见问题
 

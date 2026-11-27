@@ -2,13 +2,15 @@
 
 核对日期：2026-11-25。范围为本次交付源码快照；不包含虚拟环境中各依赖包完整的许可清单。
 
+文档发布补充：当前来源说明直接列明基础仓库及已有兼容代码来源标识，历史来源记录仍保留用于追溯；未记录的精确上游提交不作推定。
+
 自研部分与产品品牌统一使用 **Dola Studio**。`CUSTOM_LICENSE.md` 中的中英文版权行均为 `Copyright (c) 2026 Dola Studio`；不再使用“定制版贡献者”或“custom-edition contributors”作为自研署名。
 
 | 保留名称 | 出现位置 | 性质与处理 |
 | --- | --- | --- |
 | Roins-hub and contributors | 根目录 `LICENSE`；`THIRD_PARTY_NOTICES.md` | 基础项目 MIT 版权归属，保留原文。 |
-| 基础项目原始来源 | `THIRD_PARTY_NOTICES.md` 中的[原始来源记录](https://github.com/sailsships/dola-studio/blob/7212e56e14c8b695e1c51e102ccf224a61ae1814/THIRD_PARTY_NOTICES.md) | 保留原仓库与兼容代码的准确来源，不改写为 Dola Studio 自研；当前安装和更新模板改为自有仓库，配置型自动更新默认关闭。 |
-| 协议兼容与历史移植来源 | 根目录 `THIRD_PARTY_NOTICES.md` | 重复的注释来源集中到该文件，保持实际来源记录，不改写为自研作者。 |
+| 基础项目原始来源 | [Roins-hub/dola-pool](https://github.com/Roins-hub/dola-pool)；根目录 `THIRD_PARTY_NOTICES.md` | 直接列明上游仓库，保留[原始来源记录](https://github.com/sailsships/dola-studio/blob/7212e56e14c8b695e1c51e102ccf224a61ae1814/THIRD_PARTY_NOTICES.md)供追溯，不表示当前定制版等同于上游最新 main。安装和更新模板使用自有仓库，配置型自动更新默认关闭。 |
+| 协议兼容与历史移植来源 | 根目录 `THIRD_PARTY_NOTICES.md` 中的 `dola-pool-cookie`、`stable-dola-pool` 2.1.22 | 按已有记录列明来源标识；未记录的精确提交或仓库地址不作推定，不改写为自研作者。 |
 
 部署模板中的产品目录、日志目录、服务名称现已统一使用 `dola-studio`，systemd 描述为 Dola Studio；模板文件为 `deploy/dola-studio.service`、`deploy/dola-studio-health.service`、`deploy/dola-studio-health.timer`。这些模板供独立部署使用，本轮未迁移当前生产站点的运行目录与服务。
 
